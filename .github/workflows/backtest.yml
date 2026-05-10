@@ -1,0 +1,81 @@
+name: 🧪 Strategy Backtest
+
+# 매주 토요일 오전 7시 KST = 금요일 22:00 UTC (한 주 마감 후)
+# + 수동 실행 (workflow_dispatch) 으로 언제든 돌릴 수 있음
+on:
+  schedule:
+    - cron: '0 22 * * 5'
+  workflow_dispatch:
+    inputs:
+      universe:
+        description: '유니버스'
+        type: choice
+        default: 'KOSPI200'
+        options: [KOSPI200, KOSDAQ150, BOTH]
+      years:
+        description: '테스트 기간 (년)'
+        default: '3'
+      threshold:
+        description: '진입 점수 임계값'
+        default: '70'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: CONFIG 오버라이드 (수동 실행 시)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          python - << 'EOF'
+          import re, os
+          path = "kr_stock_backtest.py"
+          src = open(path, encoding="utf-8").read()
+          src = re.sub(r'"test_years": \d+', f'"test_years": ${{ inputs.years }}', src)
+          src = re.sub(r'"universe": "[^"]+"', f'"universe": "${{ inputs.universe }}"', src)
+          src = re.sub(r'"score_threshold": \d+', f'"score_threshold": ${{ inputs.threshold }}', src)
+          open(path, "w", encoding="utf-8").write(src)
+          EOF
+
+      - name: 백테스트 실행 (10~20분 소요)
+        run: python kr_stock_backtest.py | tee backtest_output.txt
+
+      - name: 요약 추출
+        id: summary
+        run: |
+          echo "### 백테스트 요약" > summary.md
+          echo '```' >> summary.md
+          grep -E "(거래 수|승률|기대값|프로핏|누적|MDD|샤프|평균 보유|KOSPI 매수보유|결과)" backtest_output.txt >> summary.md || true
+          echo '```' >> summary.md
+          cat summary.md
+
+      - name: 리포트 아티팩트 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-${{ github.run_number }}
+          path: |
+            backtest_report.html
+            backtest_trades.csv
+            backtest_output.txt
+          retention-days: 90
+
+      - name: 결과 이슈 생성
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "🧪 백테스트 결과 (run #${{ github.run_number }})"
+          content-filepath: summary.md
+          labels: backtest
