@@ -1,0 +1,83 @@
+name: 📊 Daily KR Stock Signals
+
+# 평일 오전 8:30 KST 자동 실행 (= 23:30 UTC 일~목)
+# GitHub Actions cron은 UTC 기준이라 -9시간 적용
+on:
+  schedule:
+    - cron: '30 23 * * 0-4'
+  workflow_dispatch:        # 수동 실행도 허용
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  issues: write
+
+# 동시에 두 번 안 돌게
+concurrency:
+  group: daily-signals
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 신호 스캔 실행 (5~10분 소요)
+        env:
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+        run: python kr_stock_signals.py
+
+      - name: docs 폴더 정리
+        run: |
+          mkdir -p docs
+          mv dashboard.html docs/index.html
+
+      - name: Pages 아티팩트 업로드
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./docs
+
+      - name: 작업 아티팩트로도 보관 (사설 repo 백업용)
+        uses: actions/upload-artifact@v4
+        with:
+          name: signals-${{ github.run_number }}
+          path: |
+            docs/index.html
+            top.md
+          retention-days: 30
+
+      - name: 오늘 날짜 변수
+        id: today
+        run: echo "date=$(TZ=Asia/Seoul date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+      - name: 일일 이슈 생성 (이메일 알림용)
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "📊 매매 신호 ${{ steps.today.outputs.date }}"
+          content-filepath: top.md
+          labels: daily-signal
+
+  deploy-pages:
+    needs: scan
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: GitHub Pages 배포
+        id: deployment
+        uses: actions/deploy-pages@v4
