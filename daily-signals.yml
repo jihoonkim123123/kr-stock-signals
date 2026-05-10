@@ -36,12 +36,29 @@ jobs:
       - name: 신호 스캔 실행 (5~10분 소요)
         env:
           PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
-        run: python kr_stock_signals.py
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u kr_stock_signals.py
+          echo "--- 작업 후 파일 목록 ---"
+          ls -la
 
       - name: docs 폴더 정리
         run: |
           mkdir -p docs
-          mv dashboard.html docs/index.html
+          if [ -f dashboard.html ]; then
+            mv dashboard.html docs/index.html
+            echo "✓ dashboard.html → docs/index.html"
+          else
+            echo "❌ dashboard.html 없음. 현재 디렉토리:"
+            ls -la
+            echo "다른 위치 검색:"
+            find . -name "dashboard.html" -type f 2>/dev/null || true
+            exit 1
+          fi
+          if [ -f top.md ]; then
+            cp top.md docs/top.md
+            echo "✓ top.md 복사됨"
+          fi
 
       - name: Pages 아티팩트 업로드
         uses: actions/upload-pages-artifact@v3
@@ -56,6 +73,7 @@ jobs:
             docs/index.html
             top.md
           retention-days: 30
+          if-no-files-found: warn
 
       - name: 오늘 날짜 변수
         id: today
