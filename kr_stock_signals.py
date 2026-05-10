@@ -344,6 +344,31 @@ HTML = r"""<!doctype html>
  }
  .regime small { font-weight: 400; opacity: 0.85; }
  .gridjs-table { font-size: 13px; }
+ .candidates-bar { display: inline-block; padding: 6px 12px; background: #1f6feb;
+                   color: white; border-radius: 6px; font-size: 13px; font-weight: 600;
+                   margin: 8px 0 4px; }
+ .candidates-bar.empty { background: #6c757d; }
+ .stock-name { font-weight: 600; }
+ .stock-code { color: #888; font-size: 11px; margin-left: 4px; }
+ a.stock-link { text-decoration: none; }
+ a.stock-link:hover { text-decoration: underline; }
+ /* 페이지네이션 크게 */
+ .gridjs-pagination { padding: 14px 0 !important; font-size: 14px !important; }
+ .gridjs-pagination .gridjs-pages button {
+   padding: 8px 14px !important; margin: 0 3px !important;
+   font-size: 13px !important; min-width: 40px !important;
+ }
+ .gridjs-pagination .gridjs-pages button.gridjs-currentPage {
+   background: #1f6feb !important; color: white !important;
+ }
+ .gridjs-pagination .gridjs-summary { font-size: 13px !important; padding: 8px 0 !important; }
+ .gridjs-search input { font-size: 14px !important; padding: 10px 14px !important;
+                        width: 320px !important; }
+ /* 점수 80+ 행 강조 */
+ .row-priority td { background: rgba(31, 111, 235, 0.06) !important; }
+ @media (prefers-color-scheme: dark) {
+   .row-priority td { background: rgba(88, 166, 255, 0.10) !important; }
+ }
 </style>
 <body>
 <h1>📊 한국주식 매매 신호 대시보드</h1>
@@ -364,6 +389,8 @@ HTML = r"""<!doctype html>
  <div class="tab" data-mode="swing">🎯 단기 스윙 (참고용)</div>
  <div class="tab" data-mode="all">전체 정렬</div>
 </div>
+
+<div id="candidatesBar"></div>
 
 <div id="grid"></div>
 
@@ -401,24 +428,53 @@ HTML = r"""<!doctype html>
  const link = (code, name) =>
    `<a href="https://finance.naver.com/item/main.naver?code=${code}" target="_blank">${name}</a>`;
 
+ // 종목 셀: 종목명 굵게 + 코드 작게
+ const stockCell = (code, name) =>
+   `<a class="stock-link" href="https://finance.naver.com/item/main.naver?code=${code}" target="_blank">` +
+   `<span class="stock-name">${name}</span></a><span class="stock-code">${code}</span>`;
+
+ // "매수 적절도" 점수 — 추세점수가 메인, 60일 모멘텀 가중, RSI 70 이하 보너스, 과매수 페널티
+ const buyPriority = (r) => {
+   let s = (r.trend || 0) * 1.0;
+   if (r.chg60d != null) s += Math.max(-10, Math.min(15, r.chg60d / 4));
+   if (r.rsi != null) {
+     if (r.rsi >= 50 && r.rsi <= 65) s += 5;     // 적정 강세 보너스
+     else if (r.rsi > 75) s -= 8;                // 과매수 페널티
+   }
+   if (r.vol_ratio != null && r.vol_ratio >= 1.5) s += 3;
+   return s;
+ };
+
  let grid = null;
  function render(mode) {
    let rows = [...DATA];
    if (mode === "swing") {
      rows = rows.filter(r => r.swing > 0).sort((a,b) => b.swing - a.swing);
    } else if (mode === "trend") {
-     rows = rows.filter(r => r.trend > 0).sort((a,b) => b.trend - a.trend);
+     rows = rows.filter(r => r.trend > 0)
+                .sort((a,b) => buyPriority(b) - buyPriority(a));  // 매수 적절도순
    } else {
-     rows.sort((a,b) => Math.max(b.swing,b.trend) - Math.max(a.swing,a.trend));
+     rows.sort((a,b) => buyPriority(b) - buyPriority(a));
+   }
+
+   // 진입 후보 카운트 배너
+   const SCORE_TH = 80;
+   const candCount = rows.filter(r => (mode === "swing" ? r.swing : r.trend) >= SCORE_TH).length;
+   const bar = document.getElementById("candidatesBar");
+   if (mode === "trend" || mode === "all") {
+     bar.innerHTML = candCount > 0
+       ? `<div class="candidates-bar">⭐ 오늘의 진입 후보: ${candCount}개 (점수 ${SCORE_TH}+)</div>`
+       : `<div class="candidates-bar empty">오늘은 점수 ${SCORE_TH}+ 진입 후보 없음 — 관망 권고</div>`;
+   } else {
+     bar.innerHTML = `<div class="candidates-bar empty">단기 스윙은 참고용 (백테스트상 알파 약함)</div>`;
    }
 
    const cols = [
-     { name: "종목", formatter: (_, r) =>
-        gridjs.html(`${link(r.cells[0].data, r.cells[1].data)} <span style="color:#888">${r.cells[0].data}</span>`),
-        sort: false },
-     { name: "code", hidden: true },
-     { name: "이름", hidden: true },
-     { name: "시장" },
+     { name: "종목", sort: false, width: "200px",
+       formatter: cell => gridjs.html(cell) },
+     { name: "코드", hidden: true },          // 검색용
+     { name: "이름", hidden: true },          // 검색용
+     { name: "시장", width: "85px" },
      { name: "종가", formatter: v => num(v) },
      { name: "1일", formatter: v => gridjs.html(pct(v)) },
      { name: "20일", formatter: v => gridjs.html(pct(v)) },
@@ -427,13 +483,16 @@ HTML = r"""<!doctype html>
      { name: "거래량x", formatter: v => v==null ? "-" : v.toFixed(2) },
      { name: "스윙", formatter: v => gridjs.html(scoreCell(v)) },
      { name: "추세", formatter: v => gridjs.html(scoreCell(v)) },
-     { name: "사유", width: "260px" },
+     { name: "사유", width: "240px" },
      { name: "손절", formatter: v => num(v) },
      { name: "목표", formatter: v => num(v) },
    ];
 
    const data = rows.map(r => [
-     r.code, r.code, r.name, r.market, r.close, r.chg1d, r.chg20d, r.chg60d,
+     stockCell(r.code, r.name),  // 종목 (이름+코드 결합 HTML)
+     r.code,                     // 검색용
+     r.name,                     // 검색용
+     r.market, r.close, r.chg1d, r.chg20d, r.chg60d,
      r.rsi, r.vol_ratio, r.swing, r.trend,
      mode === "trend" ? r.trend_why : (r.swing_why || r.trend_why),
      r.stop, r.target,
@@ -444,10 +503,20 @@ HTML = r"""<!doctype html>
      columns: cols,
      data,
      sort: true,
-     pagination: { limit: 30 },
+     pagination: { limit: 25, summary: true },
      search: true,
      resizable: true,
+     language: {
+       search: { placeholder: "🔍 종목명·코드·시장·사유 검색 (한글/영어/숫자)" },
+       pagination: { previous: "← 이전", next: "다음 →",
+                     showing: "", to: "~", of: "/", results: () => "건" },
+       noRecordsFound: "조건에 맞는 종목이 없어요",
+     },
      style: { table: { "white-space": "nowrap" } },
+     rowAttributes: (row) => {
+       const score = mode === "swing" ? row.cells[10].data : row.cells[11].data;
+       return score >= SCORE_TH ? { class: "row-priority" } : {};
+     },
    }).render(document.getElementById("grid"));
  }
 
