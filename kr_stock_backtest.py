@@ -65,27 +65,31 @@ CONFIG = {
 # =============================================================================
 
 def get_universe(which: str) -> list[tuple[str, str]]:
-    from pykrx import stock
-    for back in range(10):
-        d = (dt.date.today() - dt.timedelta(days=back)).strftime("%Y%m%d")
-        try:
-            k200 = stock.get_index_portfolio_deposit_file("1028", d)
-            q150 = stock.get_index_portfolio_deposit_file("2203", d)
-            if k200 and q150:
-                break
-        except Exception:
-            continue
-    else:
-        raise RuntimeError("종목 리스트를 가져오지 못했어요. 인터넷 연결 확인.")
+    """KOSPI200 / KOSDAQ150 근사 (각 시장 시가총액 상위).
+
+    pykrx 의 정식 KOSPI200 API 가 KRX 로그인을 요구해 사용 불가. 대신
+    FinanceDataReader 의 전체 상장 목록을 받아 시총 상위 200/150 으로 근사한다.
+    """
+    import FinanceDataReader as fdr
+
+    listing = fdr.StockListing("KRX")
+    cap_col = next((c for c in ("Marcap", "MarketCap", "marcap") if c in listing.columns), None)
+    if cap_col is None:
+        raise RuntimeError("StockListing 결과에서 시가총액 컬럼을 찾지 못했어요.")
+    listing = listing.dropna(subset=[cap_col, "Market", "Name"])
+    listing = listing[~listing["Name"].str.contains("스팩|우$|우B|우C", regex=True, na=False)]
+
+    kospi = listing[listing["Market"] == "KOSPI"].sort_values(cap_col, ascending=False).head(200)
+    kosdaq = listing[listing["Market"] == "KOSDAQ"].sort_values(cap_col, ascending=False).head(150)
 
     if which == "KOSPI200":
-        codes = k200
+        df = kospi
     elif which == "KOSDAQ150":
-        codes = q150
-    else:
-        codes = list(dict.fromkeys(list(k200) + list(q150)))
+        df = kosdaq
+    else:  # BOTH
+        df = pd.concat([kospi, kosdaq]).drop_duplicates("Code")
 
-    return [(c, stock.get_market_ticker_name(c)) for c in codes]
+    return [(r["Code"], r["Name"]) for _, r in df.iterrows()]
 
 
 # =============================================================================
