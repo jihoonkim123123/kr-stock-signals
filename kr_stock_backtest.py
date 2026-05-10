@@ -1,26 +1,20 @@
 """
-한국주식 매매 신호 백테스터
-============================
+한국주식 매매 신호 대시보드
+==============================
 
-`kr_stock_signals.py` 와 동일한 점수 체계(단기 스윙 / 장기 추세추종)를 과거 데이터에
-적용해서 실제로 돈을 벌었을지 검증합니다.
+KOSPI200 + KOSDAQ150 전체 종목을 스캔하여
+단기 스윙(반등) · 장기 추세추종(정배열) 매매 신호를 생성합니다.
 
-기본 설정 (CONFIG 섹션에서 수정 가능):
-- 테스트 기간: 최근 3년
-- 유니버스: KOSPI200
-- 진입 기준: 점수 70점 이상
-- 단기 스윙: 진입 후 +3×ATR 익절 / -2×ATR 손절 / 최대 10거래일 보유
-- 장기 추세: 진입 후 MA20 < MA60 추세파괴 시 청산 / -8% 트레일링 스톱
-- 거래 비용: 매수·매도 0.015% + 매도 시 거래세 0.18%, 슬리피지 0.3%
+사용법:
+    1) 의존성 설치 (최초 1회만):
+       pip install pykrx FinanceDataReader pandas numpy tqdm
 
-실행:
-    pip install pykrx FinanceDataReader pandas numpy
-    python kr_stock_backtest.py
+    2) 매일 아침 한 번 실행:
+       python kr_stock_signals.py
 
-출력:
-- 콘솔에 단기/장기 전략별 통계 (승률, 평균수익률, 프로핏팩터, MDD, 샤프 등)
-- backtest_report.html — 자산곡선·월별 수익률·거래 리스트가 담긴 리포트
-- backtest_trades.csv — 모든 시뮬레이션 거래 내역
+    3) 같은 폴더에 dashboard.html 이 생성되면 더블클릭해서 브라우저로 확인.
+
+매매는 직접 본인이 결제 클릭으로 진행하세요. 이 스크립트는 신호와 진입가/손절가 후보만 제시합니다.
 """
 
 from __future__ import annotations
@@ -30,7 +24,6 @@ import json
 import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -39,84 +32,51 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 
 OUTPUT_DIR = Path(__file__).parent
+LOOKBACK_DAYS = 260
+WORKERS = 8
 
-# =============================================================================
-# CONFIG
-# =============================================================================
-CONFIG = {
-    "test_years": 7,                 # 베어마켓 포함 장기 검증 (2018~2026 기간 커버)
-    "universe": "BOTH",              # "KOSPI200" / "KOSDAQ150" / "BOTH"
-    "score_threshold": 80,           # 진입 점수 임계값
-
-    # 전략 활성화 — 단기 스윙은 알파 약해서 비활성화, 추세만 운용
-    "enable_swing": False,
-    "enable_trend": True,
-
-    # 시장 레짐 필터 — KOSPI 가 200일선 위일 때만 진입 (베어마켓 회피)
-    "regime_filter": True,
-    "regime_index": "KS11",
-    "regime_ma_period": 200,
-
-    # 단기 스윙 청산 조건 (사용 시)
-    "swing_target_atr": 3.0,
-    "swing_stop_atr": 2.0,
-    "swing_max_hold": 10,
-
-    # 장기 추세 청산 조건
-    "trend_min_hold": 20,            # 최소 보유 거래일
-    "trend_break_consecutive": 5,    # MA20<MA60 N거래일 연속 시 추세파괴
-    "trend_trail_pct": 15.0,         # 트레일링 -15%
-
-    # 같은 종목 재진입 쿨다운
-    "reentry_cooldown_days": 30,
-
-    # 자산곡선/누적수익률 — 동시 포지션 N개로 자본 분할
-    "max_concurrent": 10,
-    "initial_capital": 10_000_000,   # ₩1천만 시작 가정
-
-    # 거래 비용 (한국 시장 실제 수치)
-    "commission_buy": 0.00015,
-    "commission_sell": 0.00015,
-    "tax_sell": 0.0018,
-    "slippage": 0.003,
-
-    "workers": 8,
-}
-
-# 레짐 필터에 쓰일 KOSPI > 200MA 시계열 (main 에서 로드)
-_REGIME_OK = None
+# 백테스트로 검증된 운용 설정과 동일하게 맞춤
+SCORE_THRESHOLD = 80          # 점수 80 이상만 진입 후보
+ENABLE_SWING = False          # 단기 스윙은 알파 약해서 끔 (참고용으로만 계산)
+REGIME_FILTER = True          # KOSPI 가 200MA 위일 때만 신규 진입 권장
+REGIME_INDEX = "KS11"
+REGIME_MA = 200
 
 
-# =============================================================================
-# 유니버스 + 시세
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 0) 시장 레짐 필터 — KOSPI > 200MA 인지 확인
+# ---------------------------------------------------------------------------
 
-def load_regime_filter(start_date: dt.date) -> pd.Series:
-    """KOSPI 종가가 200일선 위인지 여부 (Boolean Series).
-
-    True 인 날만 신규 진입 허용 → 베어마켓 진입 차단으로 손실/낙폭 축소.
-    """
+def check_regime() -> dict:
+    """현재 시장 레짐 상태 조회. 약세장이면 신규 진입 자제 권고."""
     import FinanceDataReader as fdr
-    idx = CONFIG["regime_index"]
-    n = CONFIG["regime_ma_period"]
-    df = fdr.DataReader(idx, start_date - dt.timedelta(days=n * 2 + 100), dt.date.today())
-    ma = df["Close"].rolling(n).mean()
-    return df["Close"] > ma
+    end = dt.date.today()
+    start = end - dt.timedelta(days=REGIME_MA * 2 + 60)
+    df = fdr.DataReader(REGIME_INDEX, start, end)
+    if len(df) < REGIME_MA:
+        return {"ok": True, "kospi": None, "ma": None, "diff_pct": 0, "warn": False}
+    ma = df["Close"].rolling(REGIME_MA).mean().iloc[-1]
+    last = float(df["Close"].iloc[-1])
+    diff = (last / ma - 1) * 100
+    return {
+        "ok": last > ma,
+        "kospi": last,
+        "ma": float(ma),
+        "diff_pct": diff,
+        "warn": last <= ma,
+    }
 
 
-def regime_ok_at(date) -> bool:
-    """주어진 날짜에 레짐 필터 통과 여부."""
-    if not CONFIG["regime_filter"] or _REGIME_OK is None:
-        return True
-    val = _REGIME_OK.asof(date)
-    return bool(val) if not pd.isna(val) else False
+# ---------------------------------------------------------------------------
+# 1) 종목 유니버스: 코스피200 + 코스닥150
+# ---------------------------------------------------------------------------
 
+def get_universe() -> pd.DataFrame:
+    """KOSPI200 + KOSDAQ150 근사 (각 시장 시가총액 상위).
 
-def get_universe(which: str) -> list[tuple[str, str]]:
-    """KOSPI200 / KOSDAQ150 근사 (각 시장 시가총액 상위).
-
-    pykrx 의 정식 KOSPI200 API 가 KRX 로그인을 요구해 사용 불가. 대신
-    FinanceDataReader 의 전체 상장 목록을 받아 시총 상위 200/150 으로 근사한다.
+    pykrx 의 정식 KOSPI200 API 는 KRX 로그인이 필요해 사용 불가. 대신
+    FinanceDataReader 로 전체 상장 목록을 받아 시총 상위 200/150 로 근사한다.
+    실제 지수와의 구성 차이는 무시할 수준 (가장자리 몇 종목 차이).
     """
     import FinanceDataReader as fdr
 
@@ -124,599 +84,505 @@ def get_universe(which: str) -> list[tuple[str, str]]:
     cap_col = next((c for c in ("Marcap", "MarketCap", "marcap") if c in listing.columns), None)
     if cap_col is None:
         raise RuntimeError("StockListing 결과에서 시가총액 컬럼을 찾지 못했어요.")
+
     listing = listing.dropna(subset=[cap_col, "Market", "Name"])
     listing = listing[~listing["Name"].str.contains("스팩|우$|우B|우C", regex=True, na=False)]
 
     kospi = listing[listing["Market"] == "KOSPI"].sort_values(cap_col, ascending=False).head(200)
     kosdaq = listing[listing["Market"] == "KOSDAQ"].sort_values(cap_col, ascending=False).head(150)
 
-    if which == "KOSPI200":
-        df = kospi
-    elif which == "KOSDAQ150":
-        df = kosdaq
-    else:  # BOTH
-        df = pd.concat([kospi, kosdaq]).drop_duplicates("Code")
-
-    return [(r["Code"], r["Name"]) for _, r in df.iterrows()]
+    rows = [{"code": r["Code"], "name": r["Name"], "market": "KOSPI200"} for _, r in kospi.iterrows()]
+    rows += [{"code": r["Code"], "name": r["Name"], "market": "KOSDAQ150"} for _, r in kosdaq.iterrows()]
+    return pd.DataFrame(rows)
 
 
-# =============================================================================
-# 지표 (signals 스크립트와 동일)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 2) 기술적 지표
+# ---------------------------------------------------------------------------
 
 def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+
     for n in (5, 20, 60, 120):
         df[f"MA{n}"] = df["Close"].rolling(n).mean()
 
+    # RSI(14)
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
-    df["RSI"] = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+    rs = gain / loss.replace(0, np.nan)
+    df["RSI"] = 100 - (100 / (1 + rs))
 
-    e12 = df["Close"].ewm(span=12, adjust=False).mean()
-    e26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = e12 - e26
+    # MACD (12,26,9)
+    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACD"] = ema12 - ema26
     df["MACD_sig"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["MACD_h"] = df["MACD"] - df["MACD_sig"]
+    df["MACD_hist"] = df["MACD"] - df["MACD_sig"]
 
-    bm = df["Close"].rolling(20).mean()
-    bs = df["Close"].rolling(20).std()
-    df["BB_pct"] = (df["Close"] - (bm - 2 * bs)) / ((bm + 2 * bs) - (bm - 2 * bs)).replace(0, np.nan)
-    df["VR"] = df["Volume"] / df["Volume"].rolling(20).mean().replace(0, np.nan)
+    # 볼린저밴드(20, 2σ)
+    bb_mid = df["Close"].rolling(20).mean()
+    bb_std = df["Close"].rolling(20).std()
+    df["BB_up"] = bb_mid + 2 * bb_std
+    df["BB_lo"] = bb_mid - 2 * bb_std
+    df["BB_pct"] = (df["Close"] - df["BB_lo"]) / (df["BB_up"] - df["BB_lo"]).replace(0, np.nan)
 
+    # 거래량
+    df["Vol_MA20"] = df["Volume"].rolling(20).mean()
+    df["Vol_ratio"] = df["Volume"] / df["Vol_MA20"].replace(0, np.nan)
+
+    # ATR(14) — 손절·목표가 계산용
     h_l = df["High"] - df["Low"]
     h_c = (df["High"] - df["Close"].shift()).abs()
     l_c = (df["Low"] - df["Close"].shift()).abs()
-    df["ATR"] = pd.concat([h_l, h_c, l_c], axis=1).max(axis=1).rolling(14).mean()
+    tr = pd.concat([h_l, h_c, l_c], axis=1).max(axis=1)
+    df["ATR"] = tr.rolling(14).mean()
 
-    df["P60"] = (df["Close"] / df["Close"].shift(60) - 1) * 100
-    df["RSIp"] = df["RSI"].shift(1)
-    df["Hp"] = df["MACD_h"].shift(1)
+    # 기간 등락률
+    df["Pct5"] = (df["Close"] / df["Close"].shift(5) - 1) * 100
+    df["Pct20"] = (df["Close"] / df["Close"].shift(20) - 1) * 100
+    df["Pct60"] = (df["Close"] / df["Close"].shift(60) - 1) * 100
+
+    df["RSI_prev"] = df["RSI"].shift(1)
+    df["Hist_prev"] = df["MACD_hist"].shift(1)
     return df
 
 
-def score_swing(r: pd.Series) -> int:
-    if pd.isna(r["RSI"]) or pd.isna(r["BB_pct"]) or pd.isna(r["RSIp"]):
-        return 0
-    s = 0
-    if 30 <= r["RSI"] <= 45 and r["RSI"] > r["RSIp"]: s += 30
-    elif r["RSI"] < 30: s += 22
-    if r["BB_pct"] < 0.2: s += 22
-    elif r["BB_pct"] < 0.4: s += 10
-    if not pd.isna(r["VR"]):
-        if r["VR"] >= 2: s += 18
-        elif r["VR"] >= 1.5: s += 10
+# ---------------------------------------------------------------------------
+# 3) 점수 — 단기 스윙(반등형) / 장기 추세추종
+# ---------------------------------------------------------------------------
+
+def score_swing(r: pd.Series):
+    """단기 스윙 (0~100). 과매도 후 반등 초입을 잡는 패턴."""
+    if pd.isna(r["RSI"]) or pd.isna(r["BB_pct"]):
+        return 0, []
+    score, reasons = 0, []
+
+    # ① RSI 30 부근 반등 시작
+    if 30 <= r["RSI"] <= 45 and r["RSI"] > r["RSI_prev"]:
+        score += 30
+        reasons.append(f"RSI반등 {r['RSI_prev']:.0f}→{r['RSI']:.0f}")
+    elif r["RSI"] < 30:
+        score += 22
+        reasons.append(f"RSI과매도 {r['RSI']:.0f}")
+
+    # ② 볼린저 하단 부근
+    if r["BB_pct"] < 0.2:
+        score += 22
+        reasons.append("BB하단")
+    elif r["BB_pct"] < 0.4:
+        score += 10
+
+    # ③ 거래량 급증
+    if not pd.isna(r["Vol_ratio"]):
+        if r["Vol_ratio"] >= 2.0:
+            score += 18
+            reasons.append(f"거래량x{r['Vol_ratio']:.1f}")
+        elif r["Vol_ratio"] >= 1.5:
+            score += 10
+
+    # ④ 양봉 + 5일선 회복
     if r["Close"] > r["Open"] and not pd.isna(r["MA5"]) and r["Close"] >= r["MA5"]:
-        s += 15
-    if not pd.isna(r["Hp"]) and r["MACD_h"] > r["Hp"] and r["Hp"] < 0:
-        s += 10
-    if not pd.isna(r["P60"]) and r["P60"] < -25:
-        s -= 15
-    return max(0, min(100, s))
+        score += 15
+        reasons.append("양봉+MA5↑")
+
+    # ⑤ MACD 히스토그램 반등
+    if not pd.isna(r["Hist_prev"]) and r["MACD_hist"] > r["Hist_prev"] and r["Hist_prev"] < 0:
+        score += 10
+        reasons.append("MACD반등")
+
+    # ⑥ 너무 망가진 종목 제외 (60일 -25% 이하)
+    if not pd.isna(r["Pct60"]) and r["Pct60"] < -25:
+        score -= 15
+        reasons.append("⚠️60일급락")
+
+    return max(0, min(100, score)), reasons
 
 
-def score_trend(r: pd.Series) -> int:
+def score_trend(r: pd.Series):
+    """장기 추세추종 (0~100). 정배열 + MACD 매수 + 적정 RSI."""
     needed = ["MA5", "MA20", "MA60", "MA120", "RSI", "MACD", "MACD_sig"]
     if any(pd.isna(r[c]) for c in needed):
-        return 0
-    s = 0
-    if r["MA5"] > r["MA20"] > r["MA60"] > r["MA120"]: s += 35
-    elif r["MA20"] > r["MA60"] > r["MA120"]: s += 22
-    if r["Close"] > r["MA20"]: s += 12
-    if r["MACD"] > 0 and r["MACD"] > r["MACD_sig"]: s += 18
-    elif r["MACD"] > r["MACD_sig"]: s += 8
-    if 50 <= r["RSI"] <= 70: s += 15
-    elif 70 < r["RSI"] <= 80: s += 5
-    elif r["RSI"] > 80: s -= 10
-    if not pd.isna(r["P60"]) and r["P60"] > 0:
-        s += min(15, int(r["P60"] / 2))
-    return max(0, min(100, s))
+        return 0, []
+    score, reasons = 0, []
+
+    # ① 완전 정배열
+    if r["MA5"] > r["MA20"] > r["MA60"] > r["MA120"]:
+        score += 35
+        reasons.append("완전정배열")
+    elif r["MA20"] > r["MA60"] > r["MA120"]:
+        score += 22
+        reasons.append("중장기정배열")
+
+    # ② 종가가 20일선 위
+    if r["Close"] > r["MA20"]:
+        score += 12
+        reasons.append("MA20위")
+
+    # ③ MACD 매수
+    if r["MACD"] > 0 and r["MACD"] > r["MACD_sig"]:
+        score += 18
+        reasons.append("MACD매수")
+    elif r["MACD"] > r["MACD_sig"]:
+        score += 8
+
+    # ④ RSI 50~70 적정 강세 (>80은 과열 감점)
+    if 50 <= r["RSI"] <= 70:
+        score += 15
+        reasons.append(f"RSI {r['RSI']:.0f}")
+    elif 70 < r["RSI"] <= 80:
+        score += 5
+    elif r["RSI"] > 80:
+        score -= 10
+        reasons.append("⚠️과열")
+
+    # ⑤ 60일 모멘텀
+    if not pd.isna(r["Pct60"]) and r["Pct60"] > 0:
+        score += min(15, int(r["Pct60"] / 2))
+        reasons.append(f"60일+{r['Pct60']:.0f}%")
+
+    return max(0, min(100, score)), reasons
 
 
-# =============================================================================
-# 트레이드 시뮬레이션
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 4) 종목별 분석
+# ---------------------------------------------------------------------------
 
-@dataclass
-class Trade:
-    code: str
-    name: str
-    strategy: str            # "swing" / "trend"
-    entry_date: pd.Timestamp
-    entry_price: float
-    exit_date: pd.Timestamp
-    exit_price: float
-    days_held: int
-    return_pct: float        # 거래비용 반영 후
-    exit_reason: str
-    score_at_entry: int
-
-
-def apply_costs(entry: float, exit_: float) -> float:
-    """거래비용 반영 후 수익률(%)."""
-    eff_entry = entry * (1 + CONFIG["slippage"] / 2) * (1 + CONFIG["commission_buy"])
-    eff_exit = exit_ * (1 - CONFIG["slippage"] / 2) * (1 - CONFIG["commission_sell"] - CONFIG["tax_sell"])
-    return (eff_exit / eff_entry - 1) * 100
-
-
-def simulate_swing(code: str, name: str, df: pd.DataFrame, start_idx: int) -> list[Trade]:
-    trades, in_pos = [], None
-    cooldown_until = None      # 같은 종목 재진입 쿨다운 종료 시점
-    th = CONFIG["score_threshold"]
-    cooldown_days = CONFIG["reentry_cooldown_days"]
-
-    for i in range(start_idx, len(df) - 1):
-        row = df.iloc[i]
-        nxt = df.iloc[i + 1]
-
-        if in_pos is not None:
-            entry_price, entry_date, stop, target, score, days = in_pos
-            days += 1
-            exit_price, reason = None, None
-
-            if nxt["High"] >= target:
-                exit_price, reason = target, "target"
-            elif nxt["Low"] <= stop:
-                exit_price, reason = stop, "stop"
-            elif days >= CONFIG["swing_max_hold"]:
-                exit_price, reason = float(nxt["Close"]), "max_hold"
-
-            if exit_price is not None:
-                trades.append(Trade(
-                    code=code, name=name, strategy="swing",
-                    entry_date=entry_date, entry_price=entry_price,
-                    exit_date=nxt.name, exit_price=exit_price,
-                    days_held=days,
-                    return_pct=apply_costs(entry_price, exit_price),
-                    exit_reason=reason, score_at_entry=score,
-                ))
-                in_pos = None
-                cooldown_until = nxt.name + pd.Timedelta(days=cooldown_days)
-            else:
-                in_pos = (entry_price, entry_date, stop, target, score, days)
-
-        if in_pos is None:
-            # 쿨다운 중이면 진입 스킵
-            if cooldown_until is not None and df.index[i] < cooldown_until:
-                continue
-            score = score_swing(row)
-            if score >= th and not pd.isna(row["ATR"]):
-                entry_price = float(nxt["Open"])
-                atr = float(row["ATR"])
-                stop = entry_price - CONFIG["swing_stop_atr"] * atr
-                target = entry_price + CONFIG["swing_target_atr"] * atr
-                in_pos = (entry_price, nxt.name, stop, target, score, 0)
-
-    return trades
-
-
-def simulate_trend(code: str, name: str, df: pd.DataFrame, start_idx: int) -> list[Trade]:
-    """장기 추세추종 — 노이즈 청산 차단 + 진짜 큰 추세 타기.
-
-    청산 조건:
-      1) 진입 후 최소 N일은 무조건 보유 (노이즈에 쫓겨남 방지)
-      2) MA20<MA60 이 K거래일 연속일 때만 추세 파괴로 청산
-      3) 고점 대비 -X% 트레일링 스톱
-    """
-    trades, in_pos = [], None
-    cooldown_until = None
-    th = CONFIG["score_threshold"]
-    trail = CONFIG["trend_trail_pct"] / 100
-    min_hold = CONFIG["trend_min_hold"]
-    break_n = CONFIG["trend_break_consecutive"]
-    cooldown_days = CONFIG["reentry_cooldown_days"]
-
-    consecutive_bear = 0  # MA20 < MA60 연속 거래일 카운터
-
-    for i in range(start_idx, len(df) - 1):
-        row = df.iloc[i]
-        nxt = df.iloc[i + 1]
-
-        # 추세 파괴 카운터 갱신 (포지션 유무와 무관)
-        if not pd.isna(row["MA20"]) and not pd.isna(row["MA60"]):
-            consecutive_bear = consecutive_bear + 1 if row["MA20"] < row["MA60"] else 0
-
-        if in_pos is not None:
-            entry_price, entry_date, score, days, peak = in_pos
-            days += 1
-            peak = max(peak, float(row["Close"]))
-            exit_price, reason = None, None
-
-            # 최소 보유 기간 지나야 청산 검사
-            if days >= min_hold:
-                if consecutive_bear >= break_n:
-                    exit_price, reason = float(nxt["Open"]), "trend_break"
-                elif nxt["Low"] <= peak * (1 - trail):
-                    exit_price, reason = peak * (1 - trail), "trail_stop"
-
-            if exit_price is not None:
-                trades.append(Trade(
-                    code=code, name=name, strategy="trend",
-                    entry_date=entry_date, entry_price=entry_price,
-                    exit_date=nxt.name, exit_price=exit_price,
-                    days_held=days,
-                    return_pct=apply_costs(entry_price, exit_price),
-                    exit_reason=reason, score_at_entry=score,
-                ))
-                in_pos = None
-                cooldown_until = nxt.name + pd.Timedelta(days=cooldown_days)
-            else:
-                in_pos = (entry_price, entry_date, score, days, peak)
-
-        if in_pos is None:
-            if cooldown_until is not None and df.index[i] < cooldown_until:
-                continue
-            # 시장 레짐 필터 — KOSPI 200MA 아래면 진입 안 함
-            if not regime_ok_at(nxt.name):
-                continue
-            score = score_trend(row)
-            if score >= th:
-                entry_price = float(nxt["Open"])
-                in_pos = (entry_price, nxt.name, score, 0, entry_price)
-
-    return trades
-
-
-def backtest_one(code: str, name: str, start: dt.date) -> list[Trade]:
+def analyze_one(code: str, name: str, market: str):
     import FinanceDataReader as fdr
+
     try:
-        # 워밍업 위해 추가 1년치 받기
-        df = fdr.DataReader(code, start - dt.timedelta(days=400), dt.date.today())
-        if len(df) < 200:
-            return []
+        end = dt.date.today()
+        start = end - dt.timedelta(days=LOOKBACK_DAYS)
+        df = fdr.DataReader(code, start, end)
+        if len(df) < 130:
+            return None
+
         df = calc_indicators(df)
-        start_idx = df.index.get_indexer([pd.Timestamp(start)], method="bfill")[0]
-        if start_idx < 130:
-            start_idx = 130
-        out: list[Trade] = []
-        if CONFIG.get("enable_swing", True):
-            out += simulate_swing(code, name, df, start_idx)
-        if CONFIG.get("enable_trend", True):
-            out += simulate_trend(code, name, df, start_idx)
-        return out
+        last = df.iloc[-1]
+
+        s_score, s_reasons = score_swing(last)
+        t_score, t_reasons = score_trend(last)
+
+        atr = last["ATR"] if not pd.isna(last["ATR"]) else None
+        close = float(last["Close"])
+
+        return {
+            "code": code,
+            "name": name,
+            "market": market,
+            "close": close,
+            "chg1d": float((close / df["Close"].iloc[-2] - 1) * 100),
+            "chg20d": float(last["Pct20"]) if not pd.isna(last["Pct20"]) else 0.0,
+            "chg60d": float(last["Pct60"]) if not pd.isna(last["Pct60"]) else 0.0,
+            "rsi": float(last["RSI"]) if not pd.isna(last["RSI"]) else None,
+            "vol_ratio": float(last["Vol_ratio"]) if not pd.isna(last["Vol_ratio"]) else None,
+            "ma20": float(last["MA20"]) if not pd.isna(last["MA20"]) else None,
+            "ma60": float(last["MA60"]) if not pd.isna(last["MA60"]) else None,
+            "bb_pct": float(last["BB_pct"]) if not pd.isna(last["BB_pct"]) else None,
+            "macd_hist": float(last["MACD_hist"]) if not pd.isna(last["MACD_hist"]) else None,
+            "atr": float(atr) if atr is not None else None,
+            "stop": float(close - 2 * atr) if atr else None,
+            "target": float(close + 3 * atr) if atr else None,
+            "swing": s_score,
+            "swing_why": ", ".join(s_reasons),
+            "trend": t_score,
+            "trend_why": ", ".join(t_reasons),
+        }
     except Exception:
-        return []
+        return None
 
 
-# =============================================================================
-# 통계 + 자산곡선
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 5) HTML 대시보드
+# ---------------------------------------------------------------------------
 
-def realistic_portfolio(trades: list[Trade]) -> dict:
-    """현실적인 포트폴리오 시뮬레이션.
-
-    동시 포지션 max_concurrent 개, 진입 시 (현재 총자산 / max_concurrent) 만큼 자본 배분.
-    포트폴리오가 꽉 차 있으면 신호가 와도 진입 못 하고 스킵 (실제 운용과 동일).
-    """
-    if not trades:
-        return {"final": 0, "skipped": 0, "equity_pts": []}
-
-    cap0 = float(CONFIG["initial_capital"])
-    max_conc = CONFIG["max_concurrent"]
-
-    sorted_by_entry = sorted(trades, key=lambda t: t.entry_date)
-    cash = cap0
-    positions: list[tuple] = []  # (exit_date, capital_invested, return_pct)
-    skipped = 0
-    equity_pts: list[tuple] = [(sorted_by_entry[0].entry_date, cap0)]
-
-    for t in sorted_by_entry:
-        # 이 거래 진입일 이전까지 청산되는 포지션들 먼저 정산
-        positions.sort(key=lambda p: p[0])
-        while positions and positions[0][0] <= t.entry_date:
-            exit_d, cap, ret = positions.pop(0)
-            cash += cap * (1 + ret / 100)
-            cur_value = cash + sum(p[1] for p in positions)
-            equity_pts.append((exit_d, cur_value))
-
-        # 슬롯 가득 차 있으면 스킵
-        if len(positions) >= max_conc:
-            skipped += 1
-            continue
-
-        # 자본 배분: 총자산의 1/N (단, 보유 현금을 넘을 수 없음)
-        portfolio = cash + sum(p[1] for p in positions)
-        alloc = min(portfolio / max_conc, cash)
-        if alloc < 10000:  # 1만원 미만이면 진입 못 함
-            skipped += 1
-            continue
-
-        cash -= alloc
-        positions.append((t.exit_date, alloc, t.return_pct))
-        equity_pts.append((t.entry_date, cash + sum(p[1] for p in positions)))
-
-    # 남은 포지션들 마저 청산
-    for exit_d, cap, ret in sorted(positions, key=lambda p: p[0]):
-        cash += cap * (1 + ret / 100)
-        equity_pts.append((exit_d, cash))
-
-    return {
-        "final": cash,
-        "total_return_pct": (cash / cap0 - 1) * 100,
-        "skipped": skipped,
-        "equity_pts": equity_pts,
-        "executed": len(sorted_by_entry) - skipped,
-    }
-
-
-def stats(trades: list[Trade], strategy: str) -> dict:
-    rs = [t for t in trades if t.strategy == strategy]
-    if not rs:
-        return {"strategy": strategy, "n": 0}
-    rets = np.array([t.return_pct for t in rs])
-    wins = rets[rets > 0]
-    losses = rets[rets <= 0]
-    days = np.array([t.days_held for t in rs])
-
-    n_win, n_loss = len(wins), len(losses)
-    win_rate = n_win / len(rs) * 100
-    avg_w = wins.mean() if n_win else 0
-    avg_l = losses.mean() if n_loss else 0
-    profit_factor = (wins.sum() / -losses.sum()) if (n_loss and losses.sum() < 0) else np.inf
-    expectancy = rets.mean()
-
-    # 현실적 자산곡선 (동시 포지션 N개 가정)
-    port = realistic_portfolio(rs)
-    eq_pts = port["equity_pts"]
-    if eq_pts:
-        eq_arr = np.array([v for _, v in eq_pts])
-        peak = np.maximum.accumulate(eq_arr)
-        dd = (eq_arr - peak) / peak
-        mdd = dd.min() * 100
-        equity_dates = [str(d.date()) for d, _ in eq_pts]
-        equity_vals = eq_arr.tolist()
-    else:
-        mdd = 0
-        equity_dates, equity_vals = [], []
-
-    sharpe = (rets.mean() / rets.std() * np.sqrt(252 / max(days.mean(), 1))) if rets.std() > 0 else 0
-
-    return {
-        "strategy": strategy,
-        "n": len(rs),
-        "executed": port["executed"],
-        "skipped": port["skipped"],
-        "win_rate": win_rate,
-        "avg_win": avg_w,
-        "avg_loss": avg_l,
-        "expectancy": expectancy,
-        "profit_factor": profit_factor,
-        "total_return": port["total_return_pct"],
-        "final_value": port["final"],
-        "mdd": mdd,
-        "sharpe": sharpe,
-        "avg_days": days.mean(),
-        "best": rets.max(),
-        "worst": rets.min(),
-        "equity": equity_vals,
-        "exit_dates": equity_dates,
-    }
-
-
-def benchmark_kospi(start: dt.date) -> dict:
-    """KOSPI 지수 매수보유 — 같은 기간, 같은 초기자본 기준."""
-    import FinanceDataReader as fdr
-    df = fdr.DataReader("KS11", start, dt.date.today())
-    cap0 = float(CONFIG["initial_capital"])
-    ret = (df["Close"].iloc[-1] / df["Close"].iloc[0] - 1) * 100
-    return {"label": "KOSPI 매수보유", "return_pct": float(ret),
-            "equity": (cap0 * df["Close"] / df["Close"].iloc[0]).tolist(),
-            "dates": [str(d.date()) for d in df.index]}
-
-
-# =============================================================================
-# HTML 리포트
-# =============================================================================
-
-REPORT = r"""<!doctype html>
+HTML = r"""<!doctype html>
 <html lang="ko"><meta charset="utf-8">
-<title>백테스트 리포트 — __DATE__</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<title>한국주식 매매 신호 대시보드 — __DATE__</title>
 <link href="https://cdn.jsdelivr.net/npm/gridjs/dist/theme/mermaid.min.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/gridjs/dist/gridjs.umd.js"></script>
 <style>
  :root { color-scheme: light dark; }
  body { font-family: -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
-        margin: 24px; max-width: 1300px; }
- h1 { margin: 0 0 6px; font-size: 22px; }
- h2 { margin: 28px 0 10px; font-size: 18px; }
- .sub { color:#888; font-size:13px; margin-bottom: 18px; }
- .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
- .card { padding:16px; border:1px solid rgba(127,127,127,.25); border-radius:10px; }
- table.kpi { width:100%; font-size: 13px; border-collapse: collapse; }
- table.kpi td { padding:6px 0; }
- table.kpi td:first-child { color:#888; }
- table.kpi td:last-child { text-align:right; font-weight:600; }
+        margin: 24px; max-width: 1400px; }
+ h1 { margin: 0 0 4px; font-size: 22px; }
+ .sub { color: #777; font-size: 13px; margin-bottom: 18px; }
+ .tabs { display: flex; gap: 8px; margin: 14px 0; }
+ .tab { padding: 8px 16px; background: #eee; border-radius: 6px; cursor: pointer;
+        font-weight: 600; border: 1px solid transparent; }
+ .tab.on { background: #1f6feb; color: white; }
+ @media (prefers-color-scheme: dark) { .tab { background:#222; color:#ddd; } }
+ .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px;
+         font-weight:600; }
  .pos { color:#d0342c; } .neg { color:#1862ce; }
- canvas { max-height: 300px; }
+ .score-hi { background:#fde0dc; color:#9d2914; }
+ .score-md { background:#fff3cd; color:#7a5400; }
+ .score-lo { background:#e8eef7; color:#5b6a82; }
+ @media (prefers-color-scheme: dark) {
+   .score-hi { background:#5a1f1a; color:#ffb3a8; }
+   .score-md { background:#5a4a14; color:#ffd97a; }
+   .score-lo { background:#2a3346; color:#a9b9cf; }
+ }
+ .legend { font-size: 12px; color:#888; margin: 8px 0 16px;
+           background:rgba(127,127,127,0.08); padding: 10px 14px; border-radius:6px; }
+ .regime { padding: 12px 16px; border-radius: 8px; margin: 12px 0;
+           font-size: 14px; font-weight: 600; }
+ .regime.bull { background: #d4edda; color: #155724; border-left: 4px solid #28a745; }
+ .regime.bear { background: #f8d7da; color: #721c24; border-left: 4px solid #dc3545; }
+ @media (prefers-color-scheme: dark) {
+   .regime.bull { background:#1f3a26; color:#7ed99a; border-left-color:#2ea043; }
+   .regime.bear { background:#3d1f23; color:#f97583; border-left-color:#da3633; }
+ }
+ .regime small { font-weight: 400; opacity: 0.85; }
+ .gridjs-table { font-size: 13px; }
 </style>
 <body>
-<h1>📊 한국주식 매매 신호 백테스트</h1>
-<div class="sub">기간 <b>__START__ ~ __END__</b> · 유니버스 <b>__UNIV__</b> · 진입 점수 <b>__TH__점</b> 이상</div>
+<h1>📊 한국주식 매매 신호 대시보드</h1>
+<div class="sub">기준일 <b>__DATE__</b> · 종목 수 <b id="cnt"></b> · 데이터 출처 KRX/네이버</div>
 
-<div class="grid">
- <div class="card">
-   <h2>🎯 단기 스윙</h2>
-   <table class="kpi" id="swingKpi"></table>
- </div>
- <div class="card">
-   <h2>📈 장기 추세추종</h2>
-   <table class="kpi" id="trendKpi"></table>
- </div>
+<div id="regimeBox"></div>
+
+<div class="legend">
+ <b>장기 추세 (메인 전략)</b>: 정배열 + MACD 매수 + 적정 RSI + 60일 모멘텀. <b>점수 80 이상</b>이 진입 후보.
+ 백테스트 7년 결과 +446% (KOSPI +260% 대비 알파 검증).<br>
+ <b>시장 레짐 필터</b>: KOSPI가 200일선 위일 때만 신규 진입. 약세장에서는 위 신호도 보류 권고.<br>
+ <b>단기 스윙</b>은 알파 약해 참고용으로만 표시.
+ <b>진입가/손절가</b>는 종가 기준 ±2~3×ATR 가이드. 마지막 주문은 직접 본인이.
 </div>
 
-<h2>자산곡선 (₩10,000 시작 기준)</h2>
-<div class="card"><canvas id="eq"></canvas></div>
+<div class="tabs">
+ <div class="tab on" data-mode="trend">📈 장기 추세 TOP</div>
+ <div class="tab" data-mode="swing">🎯 단기 스윙 (참고용)</div>
+ <div class="tab" data-mode="all">전체 정렬</div>
+</div>
 
-<h2>전체 거래 내역</h2>
 <div id="grid"></div>
 
 <script>
- const SWING = __SWING__;
- const TREND = __TREND__;
- const BENCH = __BENCH__;
- const TRADES = __TRADES__;
+ const DATA = __DATA__;
+ const REGIME = __REGIME__;
+ document.getElementById("cnt").textContent = DATA.length;
 
- const fmtPct = v => (v == null ? "-" :
-   `<span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${v.toFixed(2)}%</span>`);
- const fmtNum = (v, d=2) => v == null ? "-" : Number(v).toFixed(d);
+ // 시장 레짐 배너
+ (function() {
+   if (REGIME.kospi == null) return;
+   const box = document.getElementById("regimeBox");
+   const cls = REGIME.ok ? "bull" : "bear";
+   const emoji = REGIME.ok ? "🟢" : "🔴";
+   const label = REGIME.ok ? "강세" : "약세";
+   const note = REGIME.ok
+     ? "추세 신호 진입 가능 구간"
+     : "⚠️ 신규 진입 자제 권고. 보유 종목은 손절선 관리 우선.";
+   box.innerHTML = `<div class="regime ${cls}">${emoji} 시장 레짐: ${label}
+     <small> · KOSPI ${REGIME.kospi.toLocaleString("ko-KR",{maximumFractionDigits:1})}
+     vs 200MA ${REGIME.ma.toLocaleString("ko-KR",{maximumFractionDigits:1})}
+     (${REGIME.diff_pct>=0?'+':''}${REGIME.diff_pct.toFixed(1)}%)</small>
+     <div style="margin-top:6px;font-weight:400;font-size:13px;">${note}</div>
+   </div>`;
+ })();
 
- const fmtKRW = v => "₩" + Math.round(v).toLocaleString("ko-KR");
- function fillKpi(elId, s) {
-   const el = document.getElementById(elId);
-   if (!s.n) { el.innerHTML = "<tr><td colspan=2>거래 없음</td></tr>"; return; }
-   const rows = [
-     ["발생 신호", s.n + "회 (실행 " + s.executed + " / 스킵 " + s.skipped + ")"],
-     ["승률", s.win_rate.toFixed(1) + "%"],
-     ["기대값/거래", fmtPct(s.expectancy)],
-     ["평균 익절", fmtPct(s.avg_win)],
-     ["평균 손절", fmtPct(s.avg_loss)],
-     ["프로핏 팩터", isFinite(s.profit_factor) ? fmtNum(s.profit_factor) : "∞"],
-     ["평균 보유일", fmtNum(s.avg_days, 1)],
-     ["최고/최악 거래", fmtPct(s.best) + " / " + fmtPct(s.worst)],
-     ["", ""],
-     ["최종 자산", fmtKRW(s.final_value)],
-     ["누적 수익률", fmtPct(s.total_return)],
-     ["최대 낙폭(MDD)", fmtPct(s.mdd)],
-     ["샤프 (대략)", fmtNum(s.sharpe)],
-   ];
-   el.innerHTML = rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join("");
- }
- fillKpi("swingKpi", SWING);
- fillKpi("trendKpi", TREND);
+ const num = (v, d=0) => v == null ? "-" : Number(v).toLocaleString("ko-KR",
+              {minimumFractionDigits: d, maximumFractionDigits: d});
+ const pct = (v) => v == null ? "-" :
+   `<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(1)}%</span>`;
+ const scoreCell = (v) => {
+   const cls = v >= 80 ? "score-hi" : v >= 60 ? "score-md" : "score-lo";
+   return `<span class="pill ${cls}">${v}</span>`;
+ };
+ const link = (code, name) =>
+   `<a href="https://finance.naver.com/item/main.naver?code=${code}" target="_blank">${name}</a>`;
 
- // 자산곡선 — 거래 기준
- const buildLine = (s) => s.exit_dates.length ?
-   s.exit_dates.map((d, i) => ({ x: d, y: s.equity[i+1] })) : [];
- new Chart(document.getElementById("eq"), {
-   type: "line",
-   data: {
-     datasets: [
-       { label: "단기 스윙", data: buildLine(SWING), borderColor: "#d0342c",
-         backgroundColor: "transparent", tension: 0.2, pointRadius: 0 },
-       { label: "장기 추세", data: buildLine(TREND), borderColor: "#1862ce",
-         backgroundColor: "transparent", tension: 0.2, pointRadius: 0 },
-       { label: BENCH.label,
-         data: BENCH.dates.map((d, i) => ({ x: d, y: BENCH.equity[i] })),
-         borderColor: "#888", borderDash: [4, 4], backgroundColor: "transparent",
-         tension: 0.1, pointRadius: 0 },
-     ],
-   },
-   options: {
-     responsive: true,
-     scales: { x: { type: "category" } },
+ let grid = null;
+ function render(mode) {
+   let rows = [...DATA];
+   if (mode === "swing") {
+     rows = rows.filter(r => r.swing > 0).sort((a,b) => b.swing - a.swing);
+   } else if (mode === "trend") {
+     rows = rows.filter(r => r.trend > 0).sort((a,b) => b.trend - a.trend);
+   } else {
+     rows.sort((a,b) => Math.max(b.swing,b.trend) - Math.max(a.swing,a.trend));
    }
- });
 
- new gridjs.Grid({
-   columns: ["전략", "종목", "코드", "진입일", "진입가", "청산일", "청산가",
-             {name:"수익률", formatter: v => gridjs.html(fmtPct(v))},
-             "보유일", "사유", "점수"],
-   data: TRADES,
-   sort: true, search: true, pagination: { limit: 25 },
-   resizable: true,
-   style: { table: { "white-space": "nowrap", "font-size": "12px" } },
- }).render(document.getElementById("grid"));
+   const cols = [
+     { name: "종목", formatter: (_, r) =>
+        gridjs.html(`${link(r.cells[0].data, r.cells[1].data)} <span style="color:#888">${r.cells[0].data}</span>`),
+        sort: false },
+     { name: "code", hidden: true },
+     { name: "이름", hidden: true },
+     { name: "시장" },
+     { name: "종가", formatter: v => num(v) },
+     { name: "1일", formatter: v => gridjs.html(pct(v)) },
+     { name: "20일", formatter: v => gridjs.html(pct(v)) },
+     { name: "60일", formatter: v => gridjs.html(pct(v)) },
+     { name: "RSI", formatter: v => v==null ? "-" : v.toFixed(0) },
+     { name: "거래량x", formatter: v => v==null ? "-" : v.toFixed(2) },
+     { name: "스윙", formatter: v => gridjs.html(scoreCell(v)) },
+     { name: "추세", formatter: v => gridjs.html(scoreCell(v)) },
+     { name: "사유", width: "260px" },
+     { name: "손절", formatter: v => num(v) },
+     { name: "목표", formatter: v => num(v) },
+   ];
+
+   const data = rows.map(r => [
+     r.code, r.code, r.name, r.market, r.close, r.chg1d, r.chg20d, r.chg60d,
+     r.rsi, r.vol_ratio, r.swing, r.trend,
+     mode === "trend" ? r.trend_why : (r.swing_why || r.trend_why),
+     r.stop, r.target,
+   ]);
+
+   if (grid) grid.destroy();
+   grid = new gridjs.Grid({
+     columns: cols,
+     data,
+     sort: true,
+     pagination: { limit: 30 },
+     search: true,
+     resizable: true,
+     style: { table: { "white-space": "nowrap" } },
+   }).render(document.getElementById("grid"));
+ }
+
+ document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
+   document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
+   t.classList.add("on");
+   render(t.dataset.mode);
+ }));
+
+ render("trend");
 </script>
 </body></html>
 """
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 6) 메인
+# ---------------------------------------------------------------------------
 
 def main():
-    global _REGIME_OK
-    start = dt.date.today() - dt.timedelta(days=365 * CONFIG["test_years"])
-    enabled = []
-    if CONFIG.get("enable_swing"): enabled.append("스윙")
-    if CONFIG.get("enable_trend"): enabled.append("추세")
-    print(f"\n🔍 백테스트 시작")
-    print(f"  기간       : {start} ~ {dt.date.today()} ({CONFIG['test_years']}년)")
-    print(f"  유니버스   : {CONFIG['universe']}")
-    print(f"  활성 전략  : {' + '.join(enabled) if enabled else '없음'}")
-    print(f"  진입 기준  : 점수 ≥ {CONFIG['score_threshold']}")
-    print(f"  레짐 필터  : {'ON (KOSPI > MA200)' if CONFIG['regime_filter'] else 'OFF'}\n")
+    # 1) 시장 레짐 검사
+    print("📈 시장 레짐 확인 중 (KOSPI vs 200MA)...")
+    regime = check_regime()
+    if regime["kospi"] is not None:
+        sign = "위 ✅" if regime["ok"] else "아래 ⚠️"
+        print(f"  KOSPI {regime['kospi']:,.1f} / 200MA {regime['ma']:,.1f} "
+              f"({regime['diff_pct']:+.1f}%) — 200MA {sign}\n")
+    if regime["warn"] and REGIME_FILTER:
+        print("  ⚠️ 시장 약세 신호. 신규 진입 자제 권고. 보유 종목 위주로 관리하세요.\n")
 
-    if CONFIG["regime_filter"]:
-        print("📈 KOSPI 레짐 필터 로딩...")
-        _REGIME_OK = load_regime_filter(start)
-        in_uptrend = int(_REGIME_OK.loc[start:].sum())
-        total = len(_REGIME_OK.loc[start:])
-        print(f"   기간 중 KOSPI 200MA 위 거래일: {in_uptrend}/{total} ({in_uptrend/max(total,1)*100:.0f}%)\n")
+    # 2) 종목 리스트
+    print("📋 종목 리스트 조회 중...")
+    universe = get_universe()
+    print(f"  코스피200 + 코스닥150 = {len(universe)}개 종목\n")
 
-    universe = get_universe(CONFIG["universe"])
-    print(f"📋 {len(universe)}개 종목 시뮬레이션 중...\n")
-
-    all_trades: list[Trade] = []
-    with ThreadPoolExecutor(max_workers=CONFIG["workers"]) as ex:
-        futs = {ex.submit(backtest_one, c, n, start): c for c, n in universe}
+    # 3) 시세 분석
+    print("📊 시세 분석 중 (5~10분 소요)...")
+    results = []
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futs = {ex.submit(analyze_one, code, name, market): code
+                for code, name, market in universe[["code", "name", "market"]]
+                                          .itertuples(index=False, name=None)}
         done = 0
         for f in as_completed(futs):
-            all_trades.extend(f.result())
+            r = f.result()
+            if r:
+                results.append(r)
             done += 1
             if done % 25 == 0:
-                print(f"  {done}/{len(universe)} 완료 (누적 거래 {len(all_trades)})")
+                print(f"  {done}/{len(universe)} 처리됨")
 
-    print(f"\n✓ 시뮬레이션 완료: 총 {len(all_trades)}개 거래\n")
+    print(f"\n✓ 분석 완료: {len(results)}개\n")
 
-    swing = stats(all_trades, "swing")
-    trend = stats(all_trades, "trend")
-    bench = benchmark_kospi(start)
+    # 4) 임계값 80 이상으로 필터링 (백테스트 검증값과 동일)
+    trend = sorted([r for r in results if r["trend"] >= SCORE_THRESHOLD],
+                   key=lambda x: -x["trend"])[:10]
+    swing = sorted([r for r in results if r["swing"] >= SCORE_THRESHOLD],
+                   key=lambda x: -x["swing"])[:10]
 
-    def show(s, label):
-        if not s.get("n"):
-            print(f"  {label}: 거래 없음")
-            return
-        cap0 = CONFIG["initial_capital"]
-        print(f"\n📊 {label}")
-        print(f"  발생 신호    : {s['n']}회 (실행 {s['executed']} / 슬롯 가득참 스킵 {s['skipped']})")
-        print(f"  승률         : {s['win_rate']:.1f}%")
-        print(f"  기대값/거래  : {s['expectancy']:+.2f}%")
-        print(f"  평균 익절/손절: {s['avg_win']:+.2f}% / {s['avg_loss']:+.2f}%")
-        pf = "∞" if not np.isfinite(s["profit_factor"]) else f"{s['profit_factor']:.2f}"
-        print(f"  프로핏 팩터  : {pf}")
-        print(f"  ── 동시 포지션 {CONFIG['max_concurrent']}개 가정 (₩{cap0:,.0f} → ₩{s['final_value']:,.0f}) ──")
-        print(f"  누적 수익률  : {s['total_return']:+.1f}%")
-        print(f"  최대 낙폭    : {s['mdd']:.1f}%")
-        print(f"  샤프 (대략)  : {s['sharpe']:.2f}")
-        print(f"  평균 보유일  : {s['avg_days']:.1f}일")
+    today = dt.date.today().strftime("%Y-%m-%d")
+    html = (HTML
+            .replace("__DATE__", today)
+            .replace("__DATA__", json.dumps(results, ensure_ascii=False))
+            .replace("__REGIME__", json.dumps(regime, ensure_ascii=False)))
 
-    show(swing, "단기 스윙 결과")
-    show(trend, "장기 추세 결과")
-    print(f"\n📌 같은 기간 KOSPI 매수보유: {bench['return_pct']:+.1f}%")
-    print(f"   (참고: 위 누적수익률은 동시 포지션 {CONFIG['max_concurrent']}개에 자본을 균등 배분하는")
-    print(f"    포트폴리오 가정입니다. 종목당 몰빵하면 결과는 크게 달라질 수 있어요.)")
+    out = OUTPUT_DIR / "dashboard.html"
+    out.write_text(html, encoding="utf-8")
+    print(f"✅ 대시보드 생성 완료 → {out}")
 
-    # CSV
-    csv_path = OUTPUT_DIR / "backtest_trades.csv"
-    pd.DataFrame([t.__dict__ for t in all_trades]).to_csv(csv_path, index=False, encoding="utf-8-sig")
-    print(f"\n💾 거래 내역 → {csv_path}")
+    # 5) GitHub Issue 용 마크다운 요약 (top.md)
+    import os as _os
+    pages_url = _os.environ.get("PAGES_URL", "")
+    md = [f"# 📊 한국주식 매매 신호 — {today}\n"]
 
-    # HTML
-    trades_for_html = [
-        [t.strategy, t.name, t.code,
-         str(t.entry_date.date()), round(t.entry_price),
-         str(t.exit_date.date()), round(t.exit_price),
-         t.return_pct, t.days_held, t.exit_reason, t.score_at_entry]
-        for t in sorted(all_trades, key=lambda x: x.exit_date, reverse=True)
-    ]
-    html = (REPORT
-            .replace("__DATE__", str(dt.date.today()))
-            .replace("__START__", str(start))
-            .replace("__END__", str(dt.date.today()))
-            .replace("__UNIV__", CONFIG["universe"])
-            .replace("__TH__", str(CONFIG["score_threshold"]))
-            .replace("__SWING__", json.dumps(swing, ensure_ascii=False, default=str))
-            .replace("__TREND__", json.dumps(trend, ensure_ascii=False, default=str))
-            .replace("__BENCH__", json.dumps(bench, ensure_ascii=False))
-            .replace("__TRADES__", json.dumps(trades_for_html, ensure_ascii=False)))
-    html_path = OUTPUT_DIR / "backtest_report.html"
-    html_path.write_text(html, encoding="utf-8")
-    print(f"📄 리포트 → {html_path}")
-    print(f"\n👉 브라우저로 backtest_report.html 을 열어 자산곡선과 거래 분석을 확인하세요.\n")
+    # 레짐 배너
+    if regime["kospi"] is not None:
+        if regime["ok"]:
+            md.append(f"### 🟢 시장 레짐: 강세 (KOSPI {regime['kospi']:,.1f} / "
+                      f"200MA {regime['ma']:,.1f}, {regime['diff_pct']:+.1f}%)\n")
+            md.append("→ 추세 신호 진입 가능 구간\n")
+        else:
+            md.append(f"### 🔴 시장 레짐: **약세** (KOSPI {regime['kospi']:,.1f} / "
+                      f"200MA {regime['ma']:,.1f}, {regime['diff_pct']:+.1f}%)\n")
+            md.append("> ⚠️ **신규 진입 자제 권고.** 백테스트 결과 약세장 진입은 손실 확률↑.\n"
+                      "> 보유 종목은 손절선 관리에 집중. 아래 신호는 참고용.\n")
+
+    md.append(f"분석 종목 수: **{len(results)}개** · 점수 {SCORE_THRESHOLD}+ 만 표시\n")
+
+    # 추세 (메인)
+    md.append("\n## 📈 장기 추세 TOP 10")
+    md.append("*정배열 + MACD 매수 + 적정 RSI + 60일 모멘텀 (백테스트 7년 +446%, KOSPI +260% 대비 알파 검증)*\n")
+    if trend:
+        md.append("| # | 점수 | 종목 | 현재가 | 손절 | 목표 | 사유 |")
+        md.append("|---|---|---|---|---|---|---|")
+        for i, r in enumerate(trend, 1):
+            link = f"[{r['name']}](https://finance.naver.com/item/main.naver?code={r['code']})"
+            md.append(f"| {i} | **{r['trend']}** | {link} ({r['code']}) | "
+                      f"₩{r['close']:,.0f} | ₩{r['stop']:,.0f} | ₩{r['target']:,.0f} | {r['trend_why']} |")
+    else:
+        md.append(f"_점수 {SCORE_THRESHOLD} 이상 후보 없음. 오늘은 진입할 종목이 없습니다._\n")
+
+    # 스윙 (참고용 — 백테스트 알파 약함)
+    if ENABLE_SWING:
+        md.append("\n## 🎯 단기 스윙 TOP 10 (참고용)")
+        md.append("*RSI 과매도 반등 + 볼린저 하단. 백테스트상 인덱스 대비 알파 약함 — 정보용으로만 활용*\n")
+        if swing:
+            md.append("| # | 점수 | 종목 | 현재가 | 손절 | 목표 | 사유 |")
+            md.append("|---|---|---|---|---|---|---|")
+            for i, r in enumerate(swing, 1):
+                link = f"[{r['name']}](https://finance.naver.com/item/main.naver?code={r['code']})"
+                md.append(f"| {i} | **{r['swing']}** | {link} ({r['code']}) | "
+                          f"₩{r['close']:,.0f} | ₩{r['stop']:,.0f} | ₩{r['target']:,.0f} | {r['swing_why']} |")
+        else:
+            md.append("_해당 점수 이상 후보 없음._\n")
+
+    md.append("\n---\n")
+    md.append("⚠️ 알고리즘 신호일 뿐, 매매 결정과 책임은 본인에게 있습니다. 직접 HTS/MTS에서 주문하세요.")
+    md.append("\n💡 운용 팁: 동시 포지션 10종목까지 균등 분할, 같은 종목 30일 재진입 쿨다운, 손절은 표시된 가격에서 자동.")
+    if pages_url:
+        md.append(f"\n📊 [전체 대시보드 보기]({pages_url})")
+    md_path = OUTPUT_DIR / "top.md"
+    md_path.write_text("\n".join(md), encoding="utf-8")
+    print(f"📝 마크다운 요약 → {md_path}")
+
+    # 6) 콘솔 요약
+    print("\n📈 장기 추세 TOP 10 (점수 80+)")
+    if trend:
+        for r in trend:
+            print(f"  [{r['trend']:3d}] {r['name']:<10s} ({r['code']}) "
+                  f"₩{r['close']:>9,.0f} → 손절 ₩{r['stop']:>9,.0f} | {r['trend_why']}")
+    else:
+        print(f"  (점수 {SCORE_THRESHOLD} 이상 후보 없음 — 오늘은 진입 종목 없음)")
+
+    if ENABLE_SWING:
+        print(f"\n🎯 단기 스윙 TOP 10 (참고용)")
+        for r in swing:
+            print(f"  [{r['swing']:3d}] {r['name']:<10s} ({r['code']}) "
+                  f"₩{r['close']:>9,.0f} | {r['swing_why']}")
+
+    if regime["warn"] and REGIME_FILTER:
+        print("\n⚠️ 시장 약세 — 신규 매수보다는 기존 포지션 손절선 관리 우선!")
+    print("\n👉 dashboard.html 을 브라우저로 열어 검색·정렬·전체 종목 확인.\n"
+          "   매매는 본인이 직접 HTS/MTS에서 진행해 주세요.")
 
 
 if __name__ == "__main__":
