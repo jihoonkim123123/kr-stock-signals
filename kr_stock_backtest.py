@@ -44,19 +44,28 @@ OUTPUT_DIR = Path(__file__).parent
 # CONFIG
 # =============================================================================
 CONFIG = {
-    "test_years": 3,
-    "universe": "KOSPI200",          # "KOSPI200" / "KOSDAQ150" / "BOTH"
-    "score_threshold": 80,           # 진입 점수 임계값 (높일수록 신호 품질 ↑, 거래수 ↓)
+    "test_years": 7,                 # 베어마켓 포함 장기 검증 (2018~2026 기간 커버)
+    "universe": "BOTH",              # "KOSPI200" / "KOSDAQ150" / "BOTH"
+    "score_threshold": 80,           # 진입 점수 임계값
 
-    # 단기 스윙 청산 조건
+    # 전략 활성화 — 단기 스윙은 알파 약해서 비활성화, 추세만 운용
+    "enable_swing": False,
+    "enable_trend": True,
+
+    # 시장 레짐 필터 — KOSPI 가 200일선 위일 때만 진입 (베어마켓 회피)
+    "regime_filter": True,
+    "regime_index": "KS11",
+    "regime_ma_period": 200,
+
+    # 단기 스윙 청산 조건 (사용 시)
     "swing_target_atr": 3.0,
     "swing_stop_atr": 2.0,
     "swing_max_hold": 10,
 
-    # 장기 추세 청산 조건 (재설계)
-    "trend_min_hold": 20,            # 최소 보유 거래일 — 노이즈 청산 차단
-    "trend_break_consecutive": 5,    # MA20<MA60 가 N거래일 연속이면 추세 파괴로 청산
-    "trend_trail_pct": 15.0,         # 한국 시장 변동성 고려해 -15% 트레일링
+    # 장기 추세 청산 조건
+    "trend_min_hold": 20,            # 최소 보유 거래일
+    "trend_break_consecutive": 5,    # MA20<MA60 N거래일 연속 시 추세파괴
+    "trend_trail_pct": 15.0,         # 트레일링 -15%
 
     # 같은 종목 재진입 쿨다운
     "reentry_cooldown_days": 30,
@@ -66,18 +75,42 @@ CONFIG = {
     "initial_capital": 10_000_000,   # ₩1천만 시작 가정
 
     # 거래 비용 (한국 시장 실제 수치)
-    "commission_buy": 0.00015,       # 0.015%
+    "commission_buy": 0.00015,
     "commission_sell": 0.00015,
-    "tax_sell": 0.0018,              # 거래세 0.18%
-    "slippage": 0.003,               # 0.3% 양방향
+    "tax_sell": 0.0018,
+    "slippage": 0.003,
 
     "workers": 8,
 }
+
+# 레짐 필터에 쓰일 KOSPI > 200MA 시계열 (main 에서 로드)
+_REGIME_OK = None
 
 
 # =============================================================================
 # 유니버스 + 시세
 # =============================================================================
+
+def load_regime_filter(start_date: dt.date) -> pd.Series:
+    """KOSPI 종가가 200일선 위인지 여부 (Boolean Series).
+
+    True 인 날만 신규 진입 허용 → 베어마켓 진입 차단으로 손실/낙폭 축소.
+    """
+    import FinanceDataReader as fdr
+    idx = CONFIG["regime_index"]
+    n = CONFIG["regime_ma_period"]
+    df = fdr.DataReader(idx, start_date - dt.timedelta(days=n * 2 + 100), dt.date.today())
+    ma = df["Close"].rolling(n).mean()
+    return df["Close"] > ma
+
+
+def regime_ok_at(date) -> bool:
+    """주어진 날짜에 레짐 필터 통과 여부."""
+    if not CONFIG["regime_filter"] or _REGIME_OK is None:
+        return True
+    val = _REGIME_OK.asof(date)
+    return bool(val) if not pd.isna(val) else False
+
 
 def get_universe(which: str) -> list[tuple[str, str]]:
     """KOSPI200 / KOSDAQ150 근사 (각 시장 시가총액 상위).
@@ -314,6 +347,9 @@ def simulate_trend(code: str, name: str, df: pd.DataFrame, start_idx: int) -> li
         if in_pos is None:
             if cooldown_until is not None and df.index[i] < cooldown_until:
                 continue
+            # 시장 레짐 필터 — KOSPI 200MA 아래면 진입 안 함
+            if not regime_ok_at(nxt.name):
+                continue
             score = score_trend(row)
             if score >= th:
                 entry_price = float(nxt["Open"])
@@ -330,11 +366,15 @@ def backtest_one(code: str, name: str, start: dt.date) -> list[Trade]:
         if len(df) < 200:
             return []
         df = calc_indicators(df)
-        # 워밍업 끝나는 인덱스 (start_date 이후 첫 행)
         start_idx = df.index.get_indexer([pd.Timestamp(start)], method="bfill")[0]
         if start_idx < 130:
             start_idx = 130
-        return simulate_swing(code, name, df, start_idx) + simulate_trend(code, name, df, start_idx)
+        out: list[Trade] = []
+        if CONFIG.get("enable_swing", True):
+            out += simulate_swing(code, name, df, start_idx)
+        if CONFIG.get("enable_trend", True):
+            out += simulate_trend(code, name, df, start_idx)
+        return out
     except Exception:
         return []
 
@@ -588,11 +628,24 @@ REPORT = r"""<!doctype html>
 # =============================================================================
 
 def main():
+    global _REGIME_OK
     start = dt.date.today() - dt.timedelta(days=365 * CONFIG["test_years"])
+    enabled = []
+    if CONFIG.get("enable_swing"): enabled.append("스윙")
+    if CONFIG.get("enable_trend"): enabled.append("추세")
     print(f"\n🔍 백테스트 시작")
-    print(f"  기간      : {start} ~ {dt.date.today()}")
-    print(f"  유니버스  : {CONFIG['universe']}")
-    print(f"  진입 기준 : 점수 ≥ {CONFIG['score_threshold']}\n")
+    print(f"  기간       : {start} ~ {dt.date.today()} ({CONFIG['test_years']}년)")
+    print(f"  유니버스   : {CONFIG['universe']}")
+    print(f"  활성 전략  : {' + '.join(enabled) if enabled else '없음'}")
+    print(f"  진입 기준  : 점수 ≥ {CONFIG['score_threshold']}")
+    print(f"  레짐 필터  : {'ON (KOSPI > MA200)' if CONFIG['regime_filter'] else 'OFF'}\n")
+
+    if CONFIG["regime_filter"]:
+        print("📈 KOSPI 레짐 필터 로딩...")
+        _REGIME_OK = load_regime_filter(start)
+        in_uptrend = int(_REGIME_OK.loc[start:].sum())
+        total = len(_REGIME_OK.loc[start:])
+        print(f"   기간 중 KOSPI 200MA 위 거래일: {in_uptrend}/{total} ({in_uptrend/max(total,1)*100:.0f}%)\n")
 
     universe = get_universe(CONFIG["universe"])
     print(f"📋 {len(universe)}개 종목 시뮬레이션 중...\n")
