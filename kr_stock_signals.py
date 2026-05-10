@@ -607,25 +607,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n중단됨.")
         sys.exit(1)
-                  f"₩{r['close']:>9,.0f} → 손절 ₩{r['stop']:>9,.0f} | {r['trend_why']}")
-    else:
-        print(f"  (점수 {SCORE_THRESHOLD} 이상 후보 없음 — 오늘은 진입 종목 없음)")
-
-    if ENABLE_SWING:
-        print(f"\n🎯 단기 스윙 TOP 10 (참고용)")
-        for r in swing:
-            print(f"  [{r['swing']:3d}] {r['name']:<10s} ({r['code']}) "
-                  f"₩{r['close']:>9,.0f} | {r['swing_why']}")
-
-    if regime["warn"] and REGIME_FILTER:
-        print("\n⚠️ 시장 약세 — 신규 매수보다는 기존 포지션 손절선 관리 우선!")
-    print("\n👉 dashboard.html 을 브라우저로 열어 검색·정렬·전체 종목 확인.\n"
-          "   매매는 본인이 직접 HTS/MTS에서 진행해 주세요.")
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n중단됨.")
-        sys.exit(1)
