@@ -46,17 +46,32 @@ OUTPUT_DIR = Path(__file__).parent
 CONFIG = {
     "test_years": 3,
     "universe": "KOSPI200",          # "KOSPI200" / "KOSDAQ150" / "BOTH"
-    "score_threshold": 70,
+    "score_threshold": 80,           # 진입 점수 임계값 (높일수록 신호 품질 ↑, 거래수 ↓)
+
+    # 단기 스윙 청산 조건
     "swing_target_atr": 3.0,
     "swing_stop_atr": 2.0,
     "swing_max_hold": 10,
-    "trend_trail_pct": 8.0,
+
+    # 장기 추세 청산 조건 (재설계)
+    "trend_min_hold": 20,            # 최소 보유 거래일 — 노이즈 청산 차단
+    "trend_break_consecutive": 5,    # MA20<MA60 가 N거래일 연속이면 추세 파괴로 청산
+    "trend_trail_pct": 15.0,         # 한국 시장 변동성 고려해 -15% 트레일링
+
+    # 같은 종목 재진입 쿨다운
+    "reentry_cooldown_days": 30,
+
+    # 자산곡선/누적수익률 — 동시 포지션 N개로 자본 분할
+    "max_concurrent": 10,
+    "initial_capital": 10_000_000,   # ₩1천만 시작 가정
+
+    # 거래 비용 (한국 시장 실제 수치)
     "commission_buy": 0.00015,       # 0.015%
     "commission_sell": 0.00015,
     "tax_sell": 0.0018,              # 거래세 0.18%
     "slippage": 0.003,               # 0.3% 양방향
+
     "workers": 8,
-    "max_concurrent_per_stock": 1,   # 종목당 동시 1포지션
 }
 
 
@@ -194,7 +209,9 @@ def apply_costs(entry: float, exit_: float) -> float:
 
 def simulate_swing(code: str, name: str, df: pd.DataFrame, start_idx: int) -> list[Trade]:
     trades, in_pos = [], None
+    cooldown_until = None      # 같은 종목 재진입 쿨다운 종료 시점
     th = CONFIG["score_threshold"]
+    cooldown_days = CONFIG["reentry_cooldown_days"]
 
     for i in range(start_idx, len(df) - 1):
         row = df.iloc[i]
@@ -205,7 +222,6 @@ def simulate_swing(code: str, name: str, df: pd.DataFrame, start_idx: int) -> li
             days += 1
             exit_price, reason = None, None
 
-            # 익절 — 다음날 고가가 목표가 이상이면 목표가에 체결 가정
             if nxt["High"] >= target:
                 exit_price, reason = target, "target"
             elif nxt["Low"] <= stop:
@@ -223,10 +239,14 @@ def simulate_swing(code: str, name: str, df: pd.DataFrame, start_idx: int) -> li
                     exit_reason=reason, score_at_entry=score,
                 ))
                 in_pos = None
+                cooldown_until = nxt.name + pd.Timedelta(days=cooldown_days)
             else:
                 in_pos = (entry_price, entry_date, stop, target, score, days)
 
         if in_pos is None:
+            # 쿨다운 중이면 진입 스킵
+            if cooldown_until is not None and df.index[i] < cooldown_until:
+                continue
             score = score_swing(row)
             if score >= th and not pd.isna(row["ATR"]):
                 entry_price = float(nxt["Open"])
@@ -239,13 +259,30 @@ def simulate_swing(code: str, name: str, df: pd.DataFrame, start_idx: int) -> li
 
 
 def simulate_trend(code: str, name: str, df: pd.DataFrame, start_idx: int) -> list[Trade]:
+    """장기 추세추종 — 노이즈 청산 차단 + 진짜 큰 추세 타기.
+
+    청산 조건:
+      1) 진입 후 최소 N일은 무조건 보유 (노이즈에 쫓겨남 방지)
+      2) MA20<MA60 이 K거래일 연속일 때만 추세 파괴로 청산
+      3) 고점 대비 -X% 트레일링 스톱
+    """
     trades, in_pos = [], None
+    cooldown_until = None
     th = CONFIG["score_threshold"]
     trail = CONFIG["trend_trail_pct"] / 100
+    min_hold = CONFIG["trend_min_hold"]
+    break_n = CONFIG["trend_break_consecutive"]
+    cooldown_days = CONFIG["reentry_cooldown_days"]
+
+    consecutive_bear = 0  # MA20 < MA60 연속 거래일 카운터
 
     for i in range(start_idx, len(df) - 1):
         row = df.iloc[i]
         nxt = df.iloc[i + 1]
+
+        # 추세 파괴 카운터 갱신 (포지션 유무와 무관)
+        if not pd.isna(row["MA20"]) and not pd.isna(row["MA60"]):
+            consecutive_bear = consecutive_bear + 1 if row["MA20"] < row["MA60"] else 0
 
         if in_pos is not None:
             entry_price, entry_date, score, days, peak = in_pos
@@ -253,12 +290,12 @@ def simulate_trend(code: str, name: str, df: pd.DataFrame, start_idx: int) -> li
             peak = max(peak, float(row["Close"]))
             exit_price, reason = None, None
 
-            # 추세 파괴: MA20 < MA60
-            if not pd.isna(row["MA20"]) and not pd.isna(row["MA60"]) and row["MA20"] < row["MA60"]:
-                exit_price, reason = float(nxt["Open"]), "trend_break"
-            # 트레일링 스톱: 고점 대비 -8%
-            elif nxt["Low"] <= peak * (1 - trail):
-                exit_price, reason = peak * (1 - trail), "trail_stop"
+            # 최소 보유 기간 지나야 청산 검사
+            if days >= min_hold:
+                if consecutive_bear >= break_n:
+                    exit_price, reason = float(nxt["Open"]), "trend_break"
+                elif nxt["Low"] <= peak * (1 - trail):
+                    exit_price, reason = peak * (1 - trail), "trail_stop"
 
             if exit_price is not None:
                 trades.append(Trade(
@@ -270,10 +307,13 @@ def simulate_trend(code: str, name: str, df: pd.DataFrame, start_idx: int) -> li
                     exit_reason=reason, score_at_entry=score,
                 ))
                 in_pos = None
+                cooldown_until = nxt.name + pd.Timedelta(days=cooldown_days)
             else:
                 in_pos = (entry_price, entry_date, score, days, peak)
 
         if in_pos is None:
+            if cooldown_until is not None and df.index[i] < cooldown_until:
+                continue
             score = score_trend(row)
             if score >= th:
                 entry_price = float(nxt["Open"])
@@ -303,6 +343,63 @@ def backtest_one(code: str, name: str, start: dt.date) -> list[Trade]:
 # 통계 + 자산곡선
 # =============================================================================
 
+def realistic_portfolio(trades: list[Trade]) -> dict:
+    """현실적인 포트폴리오 시뮬레이션.
+
+    동시 포지션 max_concurrent 개, 진입 시 (현재 총자산 / max_concurrent) 만큼 자본 배분.
+    포트폴리오가 꽉 차 있으면 신호가 와도 진입 못 하고 스킵 (실제 운용과 동일).
+    """
+    if not trades:
+        return {"final": 0, "skipped": 0, "equity_pts": []}
+
+    cap0 = float(CONFIG["initial_capital"])
+    max_conc = CONFIG["max_concurrent"]
+
+    sorted_by_entry = sorted(trades, key=lambda t: t.entry_date)
+    cash = cap0
+    positions: list[tuple] = []  # (exit_date, capital_invested, return_pct)
+    skipped = 0
+    equity_pts: list[tuple] = [(sorted_by_entry[0].entry_date, cap0)]
+
+    for t in sorted_by_entry:
+        # 이 거래 진입일 이전까지 청산되는 포지션들 먼저 정산
+        positions.sort(key=lambda p: p[0])
+        while positions and positions[0][0] <= t.entry_date:
+            exit_d, cap, ret = positions.pop(0)
+            cash += cap * (1 + ret / 100)
+            cur_value = cash + sum(p[1] for p in positions)
+            equity_pts.append((exit_d, cur_value))
+
+        # 슬롯 가득 차 있으면 스킵
+        if len(positions) >= max_conc:
+            skipped += 1
+            continue
+
+        # 자본 배분: 총자산의 1/N (단, 보유 현금을 넘을 수 없음)
+        portfolio = cash + sum(p[1] for p in positions)
+        alloc = min(portfolio / max_conc, cash)
+        if alloc < 10000:  # 1만원 미만이면 진입 못 함
+            skipped += 1
+            continue
+
+        cash -= alloc
+        positions.append((t.exit_date, alloc, t.return_pct))
+        equity_pts.append((t.entry_date, cash + sum(p[1] for p in positions)))
+
+    # 남은 포지션들 마저 청산
+    for exit_d, cap, ret in sorted(positions, key=lambda p: p[0]):
+        cash += cap * (1 + ret / 100)
+        equity_pts.append((exit_d, cash))
+
+    return {
+        "final": cash,
+        "total_return_pct": (cash / cap0 - 1) * 100,
+        "skipped": skipped,
+        "equity_pts": equity_pts,
+        "executed": len(sorted_by_entry) - skipped,
+    }
+
+
 def stats(trades: list[Trade], strategy: str) -> dict:
     rs = [t for t in trades if t.strategy == strategy]
     if not rs:
@@ -319,45 +416,52 @@ def stats(trades: list[Trade], strategy: str) -> dict:
     profit_factor = (wins.sum() / -losses.sum()) if (n_loss and losses.sum() < 0) else np.inf
     expectancy = rets.mean()
 
-    # 자산곡선 (시간순)
-    sorted_trades = sorted(rs, key=lambda t: t.exit_date)
-    equity = [10000.0]
-    for t in sorted_trades:
-        equity.append(equity[-1] * (1 + t.return_pct / 100))
-    equity = np.array(equity)
-    peak = np.maximum.accumulate(equity)
-    dd = (equity - peak) / peak
-    mdd = dd.min() * 100 if len(dd) else 0
+    # 현실적 자산곡선 (동시 포지션 N개 가정)
+    port = realistic_portfolio(rs)
+    eq_pts = port["equity_pts"]
+    if eq_pts:
+        eq_arr = np.array([v for _, v in eq_pts])
+        peak = np.maximum.accumulate(eq_arr)
+        dd = (eq_arr - peak) / peak
+        mdd = dd.min() * 100
+        equity_dates = [str(d.date()) for d, _ in eq_pts]
+        equity_vals = eq_arr.tolist()
+    else:
+        mdd = 0
+        equity_dates, equity_vals = [], []
 
-    # 거래당 표준편차 → 거래 단위 샤프
     sharpe = (rets.mean() / rets.std() * np.sqrt(252 / max(days.mean(), 1))) if rets.std() > 0 else 0
 
     return {
         "strategy": strategy,
         "n": len(rs),
+        "executed": port["executed"],
+        "skipped": port["skipped"],
         "win_rate": win_rate,
         "avg_win": avg_w,
         "avg_loss": avg_l,
         "expectancy": expectancy,
         "profit_factor": profit_factor,
-        "total_return": (equity[-1] / equity[0] - 1) * 100,
+        "total_return": port["total_return_pct"],
+        "final_value": port["final"],
         "mdd": mdd,
         "sharpe": sharpe,
         "avg_days": days.mean(),
         "best": rets.max(),
         "worst": rets.min(),
-        "equity": equity.tolist(),
-        "exit_dates": [str(t.exit_date.date()) for t in sorted_trades],
+        "equity": equity_vals,
+        "exit_dates": equity_dates,
     }
 
 
 def benchmark_kospi(start: dt.date) -> dict:
-    """KOSPI 지수 매수보유 — 같은 기간."""
+    """KOSPI 지수 매수보유 — 같은 기간, 같은 초기자본 기준."""
     import FinanceDataReader as fdr
     df = fdr.DataReader("KS11", start, dt.date.today())
+    cap0 = float(CONFIG["initial_capital"])
     ret = (df["Close"].iloc[-1] / df["Close"].iloc[0] - 1) * 100
     return {"label": "KOSPI 매수보유", "return_pct": float(ret),
-            "equity": (10000 * df["Close"] / df["Close"].iloc[0]).tolist(),
+            "equity": (cap0 * df["Close"] / df["Close"].iloc[0]).tolist(),
             "dates": [str(d.date()) for d in df.index]}
 
 
@@ -418,21 +522,24 @@ REPORT = r"""<!doctype html>
    `<span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${v.toFixed(2)}%</span>`);
  const fmtNum = (v, d=2) => v == null ? "-" : Number(v).toFixed(d);
 
+ const fmtKRW = v => "₩" + Math.round(v).toLocaleString("ko-KR");
  function fillKpi(elId, s) {
    const el = document.getElementById(elId);
    if (!s.n) { el.innerHTML = "<tr><td colspan=2>거래 없음</td></tr>"; return; }
    const rows = [
-     ["거래 횟수", s.n],
+     ["발생 신호", s.n + "회 (실행 " + s.executed + " / 스킵 " + s.skipped + ")"],
      ["승률", s.win_rate.toFixed(1) + "%"],
      ["기대값/거래", fmtPct(s.expectancy)],
      ["평균 익절", fmtPct(s.avg_win)],
      ["평균 손절", fmtPct(s.avg_loss)],
      ["프로핏 팩터", isFinite(s.profit_factor) ? fmtNum(s.profit_factor) : "∞"],
+     ["평균 보유일", fmtNum(s.avg_days, 1)],
+     ["최고/최악 거래", fmtPct(s.best) + " / " + fmtPct(s.worst)],
+     ["", ""],
+     ["최종 자산", fmtKRW(s.final_value)],
      ["누적 수익률", fmtPct(s.total_return)],
      ["최대 낙폭(MDD)", fmtPct(s.mdd)],
      ["샤프 (대략)", fmtNum(s.sharpe)],
-     ["평균 보유일", fmtNum(s.avg_days, 1)],
-     ["최고/최악 거래", fmtPct(s.best) + " / " + fmtPct(s.worst)],
    ];
    el.innerHTML = rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join("");
  }
@@ -510,13 +617,15 @@ def main():
         if not s.get("n"):
             print(f"  {label}: 거래 없음")
             return
+        cap0 = CONFIG["initial_capital"]
         print(f"\n📊 {label}")
-        print(f"  거래 수      : {s['n']}")
+        print(f"  발생 신호    : {s['n']}회 (실행 {s['executed']} / 슬롯 가득참 스킵 {s['skipped']})")
         print(f"  승률         : {s['win_rate']:.1f}%")
         print(f"  기대값/거래  : {s['expectancy']:+.2f}%")
         print(f"  평균 익절/손절: {s['avg_win']:+.2f}% / {s['avg_loss']:+.2f}%")
         pf = "∞" if not np.isfinite(s["profit_factor"]) else f"{s['profit_factor']:.2f}"
         print(f"  프로핏 팩터  : {pf}")
+        print(f"  ── 동시 포지션 {CONFIG['max_concurrent']}개 가정 (₩{cap0:,.0f} → ₩{s['final_value']:,.0f}) ──")
         print(f"  누적 수익률  : {s['total_return']:+.1f}%")
         print(f"  최대 낙폭    : {s['mdd']:.1f}%")
         print(f"  샤프 (대략)  : {s['sharpe']:.2f}")
@@ -525,6 +634,8 @@ def main():
     show(swing, "단기 스윙 결과")
     show(trend, "장기 추세 결과")
     print(f"\n📌 같은 기간 KOSPI 매수보유: {bench['return_pct']:+.1f}%")
+    print(f"   (참고: 위 누적수익률은 동시 포지션 {CONFIG['max_concurrent']}개에 자본을 균등 배분하는")
+    print(f"    포트폴리오 가정입니다. 종목당 몰빵하면 결과는 크게 달라질 수 있어요.)")
 
     # CSV
     csv_path = OUTPUT_DIR / "backtest_trades.csv"
