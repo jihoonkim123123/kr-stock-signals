@@ -173,6 +173,28 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["P60"] = (df["Close"] / df["Close"].shift(60) - 1) * 100
     df["RSIp"] = df["RSI"].shift(1)
     df["Hp"] = df["MACD_h"].shift(1)
+
+    # 강세 RSI 다이버전스 — 가격은 저점 더 낮춤(LL), RSI는 저점 더 높임(HL)
+    p_min_recent = df["Close"].rolling(10).min()
+    p_min_prev = df["Close"].rolling(20).min().shift(10)
+    r_min_recent = df["RSI"].rolling(10).min()
+    r_min_prev = df["RSI"].rolling(20).min().shift(10)
+    df["bullish_div"] = (
+        (p_min_recent < p_min_prev) & (r_min_recent > r_min_prev) & (df["RSI"] < 60)
+    )
+
+    # 거래량 동반 횡보 돌파 (축적 패턴)
+    hi20 = df["High"].rolling(20).max()
+    lo20 = df["Low"].rolling(20).min()
+    range_20 = (hi20 - lo20) / df["Close"]
+    price_pos_20 = (df["Close"] - lo20) / (hi20 - lo20).replace(0, np.nan)
+    vol_5 = df["Volume"].rolling(5).mean()
+    vol_25 = df["Volume"].rolling(25).mean()
+    df["consolidation_breakout"] = (
+        (range_20 < 0.18) & (price_pos_20 > 0.65) &
+        (vol_5 > vol_25.replace(0, np.nan) * 1.2)
+    )
+
     return df
 
 
@@ -211,6 +233,17 @@ def score_trend(r: pd.Series) -> int:
     elif r["RSI"] > 80: s -= 10
     if not pd.isna(r["P60"]) and r["P60"] > 0:
         s += min(15, int(r["P60"] / 2))
+
+    # 강세 RSI 다이버전스 보너스 (+15)
+    bd = r.get("bullish_div", False)
+    if bd is True or (bd is not None and not pd.isna(bd) and bool(bd)):
+        s += 15
+
+    # 거래량 동반 횡보 돌파 보너스 (+12)
+    cb = r.get("consolidation_breakout", False)
+    if cb is True or (cb is not None and not pd.isna(cb) and bool(cb)):
+        s += 12
+
     return max(0, min(100, s))
 
 
