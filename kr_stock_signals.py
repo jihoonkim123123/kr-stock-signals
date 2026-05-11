@@ -135,6 +135,31 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     df["RSI_prev"] = df["RSI"].shift(1)
     df["Hist_prev"] = df["MACD_hist"].shift(1)
+
+    # 강세 RSI 다이버전스 — 가격은 저점 더 낮춤(LL), RSI는 저점 더 높임(HL)
+    df["price_min_recent"] = df["Close"].rolling(10).min()
+    df["price_min_prev"] = df["Close"].rolling(20).min().shift(10)
+    df["rsi_min_recent"] = df["RSI"].rolling(10).min()
+    df["rsi_min_prev"] = df["RSI"].rolling(20).min().shift(10)
+    df["bullish_div"] = (
+        (df["price_min_recent"] < df["price_min_prev"]) &
+        (df["rsi_min_recent"] > df["rsi_min_prev"]) &
+        (df["RSI"] < 60)  # 과매수 영역에서는 의미 없음
+    )
+
+    # 거래량 동반 횡보 → 돌파 임박 (축적 패턴)
+    hi20 = df["High"].rolling(20).max()
+    lo20 = df["Low"].rolling(20).min()
+    df["range_20"] = (hi20 - lo20) / df["Close"]
+    df["price_pos_20"] = (df["Close"] - lo20) / (hi20 - lo20).replace(0, np.nan)
+    df["vol_5"] = df["Volume"].rolling(5).mean()
+    df["vol_25"] = df["Volume"].rolling(25).mean()
+    df["consolidation_breakout"] = (
+        (df["range_20"] < 0.18) &                    # 박스 좁음
+        (df["price_pos_20"] > 0.65) &                # 박스 상단 부근
+        (df["vol_5"] > df["vol_25"].replace(0, np.nan) * 1.2)  # 거래량 1.2배+
+    )
+
     return df
 
 
@@ -191,6 +216,19 @@ def score_trend(r: pd.Series):
         score -= 10; reasons.append("⚠️과열")
     if not pd.isna(r["Pct60"]) and r["Pct60"] > 0:
         score += min(15, int(r["Pct60"] / 2)); reasons.append(f"60일+{r['Pct60']:.0f}%")
+
+    # ⑥ 강세 RSI 다이버전스 — 반전 직전 매수 신호 (+15)
+    bd = r.get("bullish_div", False)
+    if bd is True or (bd is not None and not pd.isna(bd) and bool(bd)):
+        score += 15
+        reasons.append("RSI다이버전스↑")
+
+    # ⑦ 거래량 동반 횡보 돌파 임박 — 축적 패턴 (+12)
+    cb = r.get("consolidation_breakout", False)
+    if cb is True or (cb is not None and not pd.isna(cb) and bool(cb)):
+        score += 12
+        reasons.append("횡보+거래량↑")
+
     return max(0, min(100, score)), reasons
 
 
