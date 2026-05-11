@@ -288,7 +288,7 @@ HTML = r"""<!doctype html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>한국주식 매매 신호 대시보드 — __DATE__</title>
+    <title>한국주식 매매 신호 대시보드</title>
     <link href="https://cdn.jsdelivr.net/npm/gridjs/dist/theme/mermaid.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/gridjs/dist/gridjs.umd.js"></script>
     <style>
@@ -298,7 +298,7 @@ HTML = r"""<!doctype html>
             --primary: #38bdf8;
             --up-color: #fb7185;
             --down-color: #38bdf8;
-            --text-main: #f1f5f9;
+            --text-main: #ffffff; /* 기본 텍스트 흰색 */
             --text-sub: #94a3b8;
             --border: #334155;
         }
@@ -310,54 +310,64 @@ HTML = r"""<!doctype html>
         }
 
         .header-section { max-width: 1500px; margin: 0 auto 20px; }
-        h1 { font-size: 22px; font-weight: 800; margin: 0 0 8px; color: var(--text-main); }
+        h1 { font-size: 22px; font-weight: 800; margin: 0 0 8px; color: #ffffff; }
         .sub { color: var(--text-sub); font-size: 13px; }
 
-        /* 레짐 박스 */
         .regime { padding: 16px; border-radius: 12px; margin: 15px 0; font-size: 14px; border-left: 5px solid #444; background: var(--bg-card); }
-        .regime.bull { border-left-color: #10b981; background: rgba(16, 185, 129, 0.1); }
-        .regime.bear { border-left-color: #f43f5e; background: rgba(244, 63, 94, 0.1); }
+        .regime.bull { border-left-color: #10b981; background: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .regime.bear { border-left-color: #f43f5e; background: rgba(244, 63, 94, 0.15); color: #f43f5e; }
 
-        /* 탭 디자인 */
         .tabs { display: flex; gap: 8px; margin: 20px 0; overflow-x: auto; padding-bottom: 4px; }
         .tab {
             white-space: nowrap; padding: 10px 20px; background: var(--bg-card); 
             border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 13px;
-            border: 1px solid var(--border); color: var(--text-sub);
+            border: 1px solid var(--border); color: #cbd5e1;
         }
         .tab.on { background: var(--primary); color: #0f172a; border-color: var(--primary); }
 
-        /* 테이블 컨테이너 (가로 스크롤의 핵심) */
         .table-wrap { 
             background: var(--bg-card); border-radius: 12px; padding: 12px;
             border: 1px solid var(--border); overflow-x: auto; 
         }
 
-        /* GridJS 제목 잘림 방지 및 레이아웃 최적화 */
+        /* GridJS 핵심 수정: 텍스트를 흰색(#fff)으로 강제 */
         .gridjs-table { table-layout: auto !important; width: 100% !important; min-width: 1300px; } 
         .gridjs-th { 
-            background-color: rgba(15, 23, 42, 0.8) !important; color: var(--text-sub) !important; 
+            background-color: #0f172a !important; color: #94a3b8 !important; 
             padding: 12px 8px !important; font-size: 12px !important; white-space: nowrap !important;
+            border-bottom: 2px solid var(--border) !important;
         }
-        .gridjs-td { padding: 12px 8px !important; border-bottom: 1px solid var(--border) !important; font-size: 13px; color: var(--text-main); }
+        .gridjs-td { 
+            padding: 12px 8px !important; border-bottom: 1px solid var(--border) !important; 
+            font-size: 13px !important; color: #ffffff !important; /* 모든 셀 텍스트를 흰색으로 */
+        }
         
-        /* 유틸리티 컬러 */
-        .pos { color: var(--up-color); font-weight: 600; }
-        .neg { color: var(--down-color); font-weight: 600; }
-        .pill { display:inline-block; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:700; }
-        .score-hi { background:#fb7185; color:#fff; }
-        .score-md { background:#fbbf24; color:#000; }
-        .score-lo { background:#475569; color:#fff; }
+        .pos { color: var(--up-color) !important; font-weight: 700; }
+        .neg { color: var(--down-color) !important; font-weight: 700; }
+        
+        .pill { display:inline-block; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:800; color: #fff !important; }
+        .score-hi { background:#f43f5e; }
+        .score-md { background:#f59e0b; color: #000 !important; }
+        .score-lo { background:#475569; }
 
         .stock-link { text-decoration: none; color: var(--primary); font-weight: 700; }
-        .stock-code { color: var(--text-sub); font-size: 11px; margin-left: 4px; }
-        .reason-cell { white-space: normal !important; min-width: 200px; font-size: 12px; color: var(--text-sub); }
+        .stock-code { color: #64748b; font-size: 11px; margin-left: 4px; }
+        .reason-cell { white-space: normal !important; min-width: 250px; font-size: 12px; color: #cbd5e1 !important; }
         
         .candidates-bar { display: inline-block; padding: 8px 16px; background: var(--primary); color: #0f172a; border-radius: 8px; font-size: 13px; font-weight: 700; margin-bottom: 12px; }
         .row-priority td { background: rgba(56, 189, 248, 0.08) !important; }
 
-        /* 검색창 모바일 대응 */
-        .gridjs-search-input { background: var(--bg-body) !important; color: white !important; border-color: var(--border) !important; }
+        .gridjs-search-input { 
+            background: var(--bg-body) !important; color: #ffffff !important; 
+            border: 1px solid var(--border) !important; padding: 10px 15px !important;
+        }
+        .gridjs-search-input::placeholder { color: #64748b; }
+        
+        /* 페이지네이션 텍스트 가독성 */
+        .gridjs-pagination .gridjs-summary { color: #94a3b8 !important; }
+        .gridjs-pagination button { color: #ffffff !important; background: var(--bg-card) !important; border: 1px solid var(--border) !important; }
+        .gridjs-pagination button:hover { background: var(--border) !important; }
+        .gridjs-pagination button:disabled { color: #475569 !important; }
     </style>
 </head>
 <body>
@@ -388,11 +398,10 @@ HTML = r"""<!doctype html>
     (function() {
         if (REGIME.kospi == null) return;
         const box = document.getElementById("regimeBox");
-        const cls = REGIME.ok ? "bull" : "bear";
         const emoji = REGIME.ok ? "🟢" : "🔴";
-        box.innerHTML = `<div class="regime ${cls}">
+        box.innerHTML = `<div class="regime ${REGIME.ok ? 'bull' : 'bear'}">
             <b>${emoji} 시장 레짐: ${REGIME.ok ? '강세' : '약세'}</b>
-            <div style="font-size:12px; margin-top:4px; opacity:0.8;">
+            <div style="font-size:12px; margin-top:4px; opacity:0.9;">
                 KOSPI ${REGIME.kospi.toLocaleString()} (200MA 대비 ${REGIME.diff_pct>=0?'+':''}${REGIME.diff_pct.toFixed(1)}%) | 
                 ${REGIME.ok ? '추세 신호 진입 가능 구간' : '⚠️ 신규 진입 자제 권고'}
             </div>
@@ -409,40 +418,73 @@ HTML = r"""<!doctype html>
         return `<span class="pill ${cls}">${v}</span>`;
     };
 
-    const buyPriority = (r) => {
-        let s = (r.trend || 0) * 1.0;
-        if (r.chg60d != null) s += Math.max(-10, Math.min(15, r.chg60d / 4));
-        return s;
-    };
-
     let grid = null;
     function render(mode) {
         let rows = [...DATA];
         if (mode === "swing") rows = rows.filter(r => r.swing > 0).sort((a,b) => b.swing - a.swing);
-        else if (mode === "trend") rows = rows.filter(r => r.trend > 0).sort((a,b) => buyPriority(b) - buyPriority(a));
+        else if (mode === "trend") rows = rows.filter(r => r.trend > 0).sort((a,b) => b.trend - a.trend);
 
         const SCORE_TH = 80;
         const candCount = rows.filter(r => (mode === "swing" ? r.swing : r.trend) >= SCORE_TH).length;
         const bar = document.getElementById("candidatesBar");
         bar.innerHTML = candCount > 0 ? `<div class="candidates-bar">⭐ 진입 후보: ${candCount}개 (점수 ${SCORE_TH}+)</div>` : "";
 
-        // 원본 컬럼 15개 모두 유지
-        const cols = [
-            { name: "종목", width: "180px", formatter: cell => gridjs.html(cell) },
+       const cols = [
+            { 
+                name: "종목", width: "180px", 
+                formatter: cell => gridjs.html(cell),
+                attributes: { 'title': '종목명과 종목코드 (클릭 시 네이버페이 증권 연결)' } 
+            },
             { name: "코드", hidden: true },
             { name: "이름", hidden: true },
-            { name: "시장", width: "90px" },
-            { name: "종가", width: "90px", formatter: v => num(v) },
-            { name: "1일", width: "75px", formatter: v => gridjs.html(pct(v)) },
-            { name: "20일", width: "75px", formatter: v => gridjs.html(pct(v)) },
-            { name: "60일", width: "75px", formatter: v => gridjs.html(pct(v)) },
-            { name: "RSI", width: "65px", formatter: v => v==null ? "-" : v.toFixed(0) },
-            { name: "거래량x", width: "75px", formatter: v => v==null ? "-" : v.toFixed(2) },
-            { name: "스윙", width: "65px", formatter: v => gridjs.html(scoreCell(v)) },
-            { name: "추세", width: "65px", formatter: v => gridjs.html(scoreCell(v)) },
-            { name: "사유", width: "250px", formatter: v => gridjs.html(`<div class="reason-cell">${v || ""}</div>`) },
-            { name: "손절", width: "90px", formatter: v => num(v) },
-            { name: "목표", width: "90px", formatter: v => num(v) },
+            { 
+                name: "시장", width: "90px",
+                attributes: { 'title': '해당 종목이 속한 시장 (KOSPI / KOSDAQ)' }
+            },
+            { 
+                name: "종가", width: "90px", formatter: v => num(v),
+                attributes: { 'title': '전일 종가 기준 현재 가격' }
+            },
+            { 
+                name: "1일", width: "75px", formatter: v => gridjs.html(pct(v)),
+                attributes: { 'title': '전일 대비 등락률' }
+            },
+            { 
+                name: "20일", width: "75px", formatter: v => gridjs.html(pct(v)),
+                attributes: { 'title': '최근 20거래일(약 1개월)간의 누적 수익률' }
+            },
+            { 
+                name: "60일", width: "75px", formatter: v => gridjs.html(pct(v)),
+                attributes: { 'title': '최근 60거래일(약 3개월)간의 누적 수익률 (중기 모멘텀 지표)' }
+            },
+            { 
+                name: "RSI", width: "65px", formatter: v => v==null ? "-" : v.toFixed(0),
+                attributes: { 'title': '상대강도지수: 30 이하는 과매도, 70 이상은 과매수 영역' }
+            },
+            { 
+                name: "거래량x", width: "75px", formatter: v => v==null ? "-" : v.toFixed(2),
+                attributes: { 'title': '최근 5일 평균 거래량 대비 오늘 거래량 비율 (1.0 이상 시 거래량 동반)' }
+            },
+            { 
+                name: "스윙", width: "65px", formatter: v => gridjs.html(scoreCell(v)),
+                attributes: { 'title': '단기 낙폭 과대 및 반등 확률 점수 (80점 이상 권장)' }
+            },
+            { 
+                name: "추세", width: "65px", formatter: v => gridjs.html(scoreCell(v)),
+                attributes: { 'title': '정배열 및 중장기 상승 동력 점수 (80점 이상 권장)' }
+            },
+            { 
+                name: "사유", width: "250px", formatter: v => gridjs.html(`<div class="reason-cell">${v || ""}</div>`),
+                attributes: { 'title': '알고리즘이 해당 종목을 포착한 기술적 근거' }
+            },
+            { 
+                name: "손절가", width: "90px", formatter: v => num(v),
+                attributes: { 'title': '리스크 관리를 위한 최소 매도 기준 가격 (종가 기준)' }
+            },
+            { 
+                name: "목표가", width: "90px", formatter: v => num(v),
+                attributes: { 'title': '기술적 저항선을 고려한 1차 목표 매도 가격' }
+            },
         ];
 
         const data = rows.map(r => [
@@ -455,13 +497,8 @@ HTML = r"""<!doctype html>
 
         if (grid) grid.destroy();
         grid = new gridjs.Grid({
-            columns: cols,
-            data,
-            sort: true,
-            pagination: { limit: 20 },
-            search: true,
-            resizable: true,
-            language: { search: { placeholder: "🔍 검색..." } },
+            columns: cols, data, sort: true, pagination: { limit: 20 }, search: true, resizable: true,
+            language: { search: { placeholder: "🔍 종목명·코드 검색" } },
             rowAttributes: (row) => {
                 const score = mode === "swing" ? row.cells[10].data : row.cells[11].data;
                 return score >= SCORE_TH ? { class: "row-priority" } : {};
