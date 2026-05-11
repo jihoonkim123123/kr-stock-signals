@@ -357,11 +357,31 @@ HTML = r"""<!doctype html>
             padding: 16px 10px !important; font-size: 12px !important; font-weight: 700 !important;
             text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid var(--border) !important;
         }
+/* 1. 테이블 셀 스타일 수정: 투명도 제거 및 흰색 강제 적용 */
         .gridjs-td { 
-            padding: 16px 10px !important; border-bottom: 1px solid var(--border) !important; 
-            font-size: 14px !important; color: #ffffff !important; 
+            padding: 16px 10px !important; 
+            border-bottom: 1px solid var(--border) !important; 
+            font-size: 14px !important; 
+            color: #ffffff !important; /* 글자색을 완전한 흰색으로 고정 */
+            background-color: transparent !important;
         }
-        .gridjs-tr:hover .gridjs-td { background-color: var(--hover-row) !important; }
+
+        /* 2. 마우스를 올리지 않았을 때도 글자가 잘 보이도록 배경색 대비 조정 */
+        .gridjs-tr {
+            background-color: var(--bg-card) !important;
+        }
+
+        /* 3. 호버(마우스 오버) 시 행 전체 배경색과 글자색 변경 */
+        .gridjs-tr:hover .gridjs-td { 
+            background-color: var(--hover-row) !important; 
+            color: var(--primary) !important; /* 마우스를 올리면 글자가 로빈후드 그린으로 변경 */
+        }
+
+        /* 4. 점수(Pill) 스타일 가독성 보정 */
+        .score-lo { 
+            background: #2d3748 !important; /* 너무 어두웠던 배경을 살짝 밝게 */
+            color: #ffffff !important; 
+        }
         .row-priority td { background: rgba(0, 255, 138, 0.04) !important; }
 
         .pos { color: var(--up-color) !important; font-weight: 700; }
