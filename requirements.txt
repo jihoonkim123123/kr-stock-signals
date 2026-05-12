@@ -5,4 +5,11 @@ numpy>=1.24
 lxml>=4.9
 requests>=2.31
 beautifulsoup4>=4.12
- 
+pykrx>=1.0.45
+
+# DART API (재무제표)
+requests>=2.31.0
+
+# 네이버 뉴스 크롤링
+beautifulsoup4>=4.12.0
+
