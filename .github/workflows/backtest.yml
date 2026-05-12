@@ -1,23 +1,22 @@
 name: 🧪 Strategy Backtest
 
-# 매주 토요일 오전 7시 KST = 금요일 22:00 UTC (한 주 마감 후)
-# + 수동 실행 (workflow_dispatch) 으로 언제든 돌릴 수 있음
+# 매주 토요일 오전 7시 KST + 수동 실행
 on:
   schedule:
-    - cron: '0 22 * * 5'
+    - cron: '0 22 * * 5'   # 금요일 22:00 UTC = 토요일 07:00 KST
   workflow_dispatch:
     inputs:
       universe:
-        description: '유니버스'
+        description: '유니버스 (KOSPI200 / KOSDAQ150 / BOTH)'
         type: choice
-        default: 'KOSPI200'
+        default: 'BOTH'
         options: [KOSPI200, KOSDAQ150, BOTH]
       years:
         description: '테스트 기간 (년)'
-        default: '3'
+        default: '15'
       threshold:
         description: '진입 점수 임계값'
-        default: '70'
+        default: '80'
 
 permissions:
   contents: read
@@ -26,7 +25,7 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50          # grok: 계산량 증가로 timeout 늘림
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +37,11 @@ jobs:
       - name: 의존성 설치
         run: pip install -r requirements.txt
 
+      - name: grok + Dalio 업그레이드 확인
+        run: |
+          echo "=== kr_stock_backtest.py grok 버전 확인 ==="
+          grep -E "GROK|Ray Dalio|grok:" kr_stock_backtest.py || echo "grok 주석 없음"
+
       - name: CONFIG 오버라이드 (수동 실행 시)
         if: github.event_name == 'workflow_dispatch'
         run: |
@@ -45,21 +49,30 @@ jobs:
           import re, os
           path = "kr_stock_backtest.py"
           src = open(path, encoding="utf-8").read()
-          src = re.sub(r'"test_years": \d+', f'"test_years": ${{ inputs.years }}', src)
+          
+          # grok: 입력값 반영
+          src = re.sub(r'"test_years": \d+', f'"test_years": {int("${{ inputs.years }}")}', src)
           src = re.sub(r'"universe": "[^"]+"', f'"universe": "${{ inputs.universe }}"', src)
-          src = re.sub(r'"score_threshold": \d+', f'"score_threshold": ${{ inputs.threshold }}', src)
+          src = re.sub(r'"score_threshold": \d+', f'"score_threshold": {int("${{ inputs.threshold }}")}', src)
+          
+          # grok: 백테스트 강화 옵션 강제 설정
+          src = re.sub(r'"max_concurrent": \d+', '"max_concurrent": 18', src)
+          src = re.sub(r'"enable_swing": (True|False)', '"enable_swing": True', src)
+          
           open(path, "w", encoding="utf-8").write(src)
+          print("CONFIG 업데이트 완료 (max_concurrent=18, enable_swing=True)")
           EOF
 
-      - name: 백테스트 실행 (10~20분 소요)
+      - name: 백테스트 실행 (Dalio 업그레이드 버전)
         run: python kr_stock_backtest.py | tee backtest_output.txt
 
       - name: 요약 추출
         id: summary
         run: |
-          echo "### 백테스트 요약" > summary.md
+          echo "### 🧪 백테스트 결과 (grok + Dalio 버전)" > summary.md
+          echo "**Run**: #${{ github.run_number }} | **날짜**: $(date)" >> summary.md
           echo '```' >> summary.md
-          grep -E "(거래 수|승률|기대값|프로핏|누적|MDD|샤프|평균 보유|KOSPI 매수보유|결과)" backtest_output.txt >> summary.md || true
+          grep -E "(단기 스윙|장기 추세|승률|기대값|프로핏|누적 수익률|MDD|샤프|Monte Carlo|거래 없음|KOSPI 매수보유)" backtest_output.txt >> summary.md || true
           echo '```' >> summary.md
           cat summary.md
 
@@ -76,6 +89,6 @@ jobs:
       - name: 결과 이슈 생성
         uses: peter-evans/create-issue-from-file@v5
         with:
-          title: "🧪 백테스트 결과 (run #${{ github.run_number }})"
+          title: "🧪 백테스트 결과 (grok Dalio #${{ github.run_number }})"
           content-filepath: summary.md
-          labels: backtest
+          labels: backtest, grok-dalio
