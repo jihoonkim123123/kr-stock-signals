@@ -35,10 +35,7 @@ jobs:
       - name: 의존성 설치
         run: pip install -r requirements.txt
 
-      - name: grok 버전 확인
-        run: grep -E "GROK|Dalio|grok:" kr_stock_backtest.py || echo "grok 주석 미적용"
-
-      - name: CONFIG 강제 오버라이드 (grok Dalio 설정)
+      - name: grok Dalio 설정 강제 적용
         run: |
           python - << 'EOF'
           import re
@@ -48,19 +45,23 @@ jobs:
           src = re.sub(r'"max_concurrent": \d+', '"max_concurrent": 18', src)
           src = re.sub(r'"score_threshold": \d+', '"score_threshold": 80', src)
           open(path, "w", encoding="utf-8").write(src)
-          print("✅ grok Dalio CONFIG 적용 완료")
+          print("✅ grok + Dalio CONFIG 적용 완료")
           EOF
 
       - name: 백테스트 실행
         run: python kr_stock_backtest.py | tee backtest_output.txt
 
-      - name: 요약 추출 (개선됨)
+      - name: 요약 추출 (강화 버전)
         id: summary
         run: |
-          echo "### 🧪 백테스트 결과 (grok + Dalio 버전 #${{ github.run_number }})" > summary.md
+          echo "### 🧪 백테스트 결과 (grok + Dalio #${{ github.run_number }})" > summary.md
           echo "Run Date: $(date)" >> summary.md
           echo '```text' >> summary.md
-          grep -E "(단기 스윙|장기 추세|승률|기대값|프로핏|누적 수익률|최대 낙폭|MDD|샤프|거래 없음|Monte Carlo|KOSPI 매수보유)" backtest_output.txt | head -30 >> summary.md || true
+          grep -E "GROK|DALIO|단기 스윙|장기 추세|승률|기대값|프로핏|누적 수익률|최대 낙폭|MDD|샤프|거래|완료|시작" backtest_output.txt | head -50 >> summary.md || true
+          if [ $(wc -l < summary.md) -lt 15 ]; then
+            echo "=== 전체 로그 일부 ===" >> summary.md
+            tail -n 100 backtest_output.txt >> summary.md
+          fi
           echo '```' >> summary.md
           cat summary.md
 
