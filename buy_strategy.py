@@ -52,8 +52,12 @@ def generate_buy_strategy(
     sd = stock_data.get("supply_demand", {})
     smart_score = sd.get("smart_money_score", 50)
     
-    # 감성 데이터
-    sentiment = stock_data.get("sentiment", 0)
+    # 감성 데이터 - 딕셔너리로 올 경우를 대비해 숫자로 안전하게 추출
+    raw_sentiment = stock_data.get("sentiment", 0)
+    if isinstance(raw_sentiment, dict):
+        sentiment = raw_sentiment.get("score", 0)
+    else:
+        sentiment = raw_sentiment
     
     # 종목별 투자 자금
     allocation = total_budget * (portfolio_pct / 100)
