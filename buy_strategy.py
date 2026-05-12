@@ -165,7 +165,7 @@ def generate_buy_strategy(
         + expected["bear"]["return_pct"] * expected["bear"]["probability"]
     ) / 100
     
-    # ---------- 리스크 관리 ----------
+    # 리스크 관리 메시지 구성
     risk_mgmt = [
         f"Stop-Loss ₩{final_stop:,.0f} 이탈 시 즉시 손절 (-{round((avg_buy_price - final_stop) / avg_buy_price * 100, 1)}%)",
         f"신용/레버리지 사용 금지",
@@ -180,8 +180,11 @@ def generate_buy_strategy(
     if smart_score < 40:
         risk_mgmt.append(f"⚠️ 스마트머니 점수 {smart_score} = 외국인/기관 매도 우위")
     
-    if sentiment < -20:
-        risk_mgmt.append(f"⚠️ 뉴스 감성 {sentiment:+.0f} = 부정적 뉴스 우세")
+    # ✅ [수정 포인트] sentiment가 딕셔너리인 경우를 완벽 방어
+    actual_sentiment = sentiment.get('score', 0) if isinstance(sentiment, dict) else sentiment
+    
+    if actual_sentiment < -20:
+        risk_mgmt.append(f"⚠️ 뉴스 감성 {actual_sentiment:+.0f} = 부정적 뉴스 우세")
     
     # ---------- 한줄 요약 ----------
     smart_money_signal = (
