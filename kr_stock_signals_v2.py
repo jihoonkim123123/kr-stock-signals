@@ -21,6 +21,7 @@ import datetime as dt
 import json
 import os
 import sys
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
