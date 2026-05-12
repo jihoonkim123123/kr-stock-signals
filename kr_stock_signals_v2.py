@@ -341,14 +341,34 @@ def main():
     # 7. 매수 전략 자동 생성 (상위 20개)
     if ENABLE_BUY_STRATEGY:
         print("📝 매수 전략 자동 생성...")
-        # 종합 점수 상위 20개만
+        # 종합 점수 상위 20개만 추출
         top_combined = sorted(results, key=lambda x: -x["combined"])[:20]
+        
         for r in top_combined:
-            r["buy_strategy"] = generate_buy_strategy(
-                r,
-                portfolio_pct=5.0,
-                total_budget=60_000_000,  # 예시
-            )
+            # ✅ 에러 방지: 뉴스 분석 결과(dict)에서 숫자 점수(score)만 추출하여 전달
+            news_data = r.get("news_analysis")
+            
+            # 뉴스 데이터가 dict 형태라면 그 안의 'score'를 쓰고, 없으면 0점 처리
+            if isinstance(news_data, dict):
+                r['sentiment'] = news_data.get('score', 0)
+            else:
+                r['sentiment'] = 0  # 뉴스 분석이 실패했거나 데이터가 없을 경우
+            
+            # ✅ 수급 데이터가 누락되었을 경우를 대비한 기본값 설정
+            if 'individual_value' not in r:
+                r['individual_value'] = 0
+                r['foreign_value'] = 0
+                r['institution_value'] = 0
+
+            try:
+                r["buy_strategy"] = generate_buy_strategy(
+                    r,
+                    portfolio_pct=5.0,
+                    total_budget=60_000_000,
+                )
+            except Exception as e:
+                print(f"⚠️ {r.get('name')} 전략 생성 중 오류 발생: {e}")
+                r["buy_strategy"] = None
     
     # 8. 대시보드 생성
     print("🎨 대시보드 생성 중...")
