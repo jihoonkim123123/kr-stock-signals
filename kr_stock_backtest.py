@@ -48,7 +48,8 @@ CONFIG = {
     # grok: Dalio 개선 — 전략 활성화
     "enable_swing": True,      # 단기 스윙 활성화
     "enable_trend": True,
-    
+    "max_concurrent": 18,      # ← grok: 18개
+    "trend_trail_pct": 12.0,   # 강화
     "regime_filter": True,
     "regime_index": "KS11",
     "regime_ma_period": 200,
