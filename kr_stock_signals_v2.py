@@ -338,29 +338,26 @@ def main():
         scores = calculate_combined_score(r)
         r.update(scores)
     
-    # 7. 매수 전략 자동 생성 (상위 20개)
+   # 7. 매수 전략 자동 생성 (상위 20개)
     if ENABLE_BUY_STRATEGY:
         print("📝 매수 전략 자동 생성...")
-        # 종합 점수 상위 20개만 추출
         top_combined = sorted(results, key=lambda x: -x["combined"])[:20]
         
         for r in top_combined:
-            # ✅ 에러 방지: 뉴스 분석 결과(dict)에서 숫자 점수(score)만 추출하여 전달
-            news_data = r.get("news_analysis")
-            
-            # 뉴스 데이터가 dict 형태라면 그 안의 'score'를 쓰고, 없으면 0점 처리
-            if isinstance(news_data, dict):
-                r['sentiment'] = news_data.get('score', 0)
-            else:
-                r['sentiment'] = 0  # 뉴스 분석이 실패했거나 데이터가 없을 경우
-            
-            # ✅ 수급 데이터가 누락되었을 경우를 대비한 기본값 설정
-            if 'individual_value' not in r:
-                r['individual_value'] = 0
-                r['foreign_value'] = 0
-                r['institution_value'] = 0
+            # ✅ 수급 데이터 누락 방지 (기본 구조 주입)
+            if not r.get('supply_demand'):
+                r['supply_demand'] = {
+                    'smart_money_score': 50,
+                    'individual_value': 0,
+                    'foreign_value': 0,
+                    'institution_value': 0
+                }
 
             try:
+                # 💡 TIP: 여기서 r['sentiment']는 이미 위(281라인)에서 
+                # {'score': n, 'total': n, 'items': [...]} 형태의 딕셔너리로 저장되어 있습니다.
+                # buy_strategy.py가 이 딕셔너리를 스스로 처리하도록 두는 게 가장 안전합니다.
+                
                 r["buy_strategy"] = generate_buy_strategy(
                     r,
                     portfolio_pct=5.0,
