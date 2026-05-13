@@ -1,9 +1,9 @@
 """
-KR Stock Signals v4 - v3 + v2 완전 병합 (최종)
+KR Stock Signals v4 - v3 + v2 완전 병합 (Grok Edition)
 ============================================================
-- v3: 기술적 분석 + 수급 + 뉴스 + 종합점수 + ATR 필터
-- v2: AGGRESSIVE 매수전략 + Tier 매수 + Stop-Loss + 차익실현 사다리 + Naver 재무
-- DART 제거 → Naver Finance (빠름)
+- v3: 기술적 분석 + 수급 + 뉴스 + 종합점수
+- v2: AGGRESSIVE 매수전략 + Tier 매수 + Stop-Loss + 차익실현 사다리
+- Naver Finance 재무 분석 (DART 대신 빠름)
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ CONFIG = {
 }
 
 # =============================================================================
-# Naver Finance 재무 (DART 대체)
+# Naver Finance 재무 분석
 # =============================================================================
 def get_naver_financials(code: str):
     try:
@@ -51,24 +51,18 @@ def get_naver_financials(code: str):
             "per": per.get_text(strip=True) if per else "N/A",
             "roe": roe.get_text(strip=True) if roe else "N/A",
             "summary": "Naver Finance 기반 성장성·수익성 양호",
-            "sections": {
-                "성장성": "긍정적", "수익성": "안정적", "안정성": "양호",
-                "현금창출": "우수", "배당": "보통"
-            }
+            "sections": {"성장성": "긍정적", "수익성": "안정적", "안정성": "양호"}
         }
     except:
         return {"summary": "Naver Finance 조회 실패", "sections": {}}
 
 # =============================================================================
-# buy_strategy (v2에서 그대로 사용)
+# buy_strategy (v2에서 import)
 # =============================================================================
-# buy_strategy.py 내용을 여기 포함 (필요시 별도 import)
-# (이전 파일에서 제공된 generate_buy_strategy 함수 그대로 사용)
-
-from buy_strategy import generate_buy_strategy   # buy_strategy.py가 있으면 import
+from buy_strategy import generate_buy_strategy
 
 # =============================================================================
-# v3 핵심 기술적 분석 (간소화 버전)
+# 기술적 분석 (v3 기반)
 # =============================================================================
 def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -87,39 +81,12 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def score_trend(r):
     s = 0
-    if r.get("MA5", 0) > r.get("MA20", 0) > r.get("MA60", 0):
-        s += 40
-    if r.get("Close", 0) > r.get("MA20", 0):
-        s += 20
-    if r.get("RSI", 0) >= 50:
-        s += 15
+    if r.get("MA5", 0) > r.get("MA20", 0) > r.get("MA60", 0): s += 40
+    if r.get("Close", 0) > r.get("MA20", 0): s += 20
+    if r.get("RSI", 0) >= 50: s += 15
     return max(0, min(100, s))
 
-# =============================================================================
-# MAIN
-# =============================================================================
-def main():
-    print("🚀 KR Stock Signals v4 시작 (v3 + v2 병합)")
-
-    import FinanceDataReader as fdr
-    listing = fdr.StockListing("KRX")
-    universe = listing.head(150)  # 테스트용, 실제로는 350개로 늘려도 OK
-
-    results = []
-    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futs = {ex.submit(analyze_one, r["Code"], r["Name"]): r for _, r in universe.iterrows()}
-        for f in as_completed(futs):
-            r = f.result()
-            if r:
-                # v2 기능 추가
-                r["buy_strategy"] = generate_buy_strategy(r)
-                r["naver_financials"] = get_naver_financials(r["code"])
-                results.append(r)
-
-    generate_v4_dashboard(results)
-    print("✅ v4 완료 → dashboard_v4.html 열어보세요")
-
-def analyze_one(code, name):
+def analyze_one(code: str, name: str):
     import FinanceDataReader as fdr
     try:
         df = fdr.DataReader(code, dt.date.today() - dt.timedelta(days=LOOKBACK_DAYS))
@@ -132,12 +99,15 @@ def analyze_one(code, name):
             "name": name,
             "close": float(last["Close"]),
             "trend": trend,
-            "combined_score": trend + 5,
-            "atr": float(last["ATR"]) if not pd.isna(last["ATR"]) else None,
+            "combined_score": trend + 8,
+            "atr": float(last.get("ATR", 0)) if not pd.isna(last.get("ATR")) else None,
         }
     except:
         return None
 
+# =============================================================================
+# 대시보드 생성 (v2 모달 포함)
+# =============================================================================
 def generate_v4_dashboard(results):
     html = f"""<!DOCTYPE html>
 <html lang="ko">
@@ -182,6 +152,30 @@ function closeModal() {{ document.getElementById("modal").style.display = "none"
 </body>
 </html>"""
     (OUTPUT_DIR / "dashboard_v4.html").write_text(html, encoding="utf-8")
+    (OUTPUT_DIR / "dashboard.html").write_text(html, encoding="utf-8")   # 기존 workflow 호환
+    print("✅ dashboard_v4.html + dashboard.html 생성 완료")
+
+# =============================================================================
+# MAIN
+# =============================================================================
+def main():
+    print("🚀 KR Stock Signals v4 시작")
+    import FinanceDataReader as fdr
+    listing = fdr.StockListing("KRX")
+    universe = listing.head(200)
+
+    results = []
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futs = {ex.submit(analyze_one, r["Code"], r["Name"]): r for _, r in universe.iterrows()}
+        for f in as_completed(futs):
+            r = f.result()
+            if r:
+                r["buy_strategy"] = generate_buy_strategy(r)
+                r["naver_financials"] = get_naver_financials(r["code"])
+                results.append(r)
+
+    generate_v4_dashboard(results)
+    print("✅ v4 실행 완료")
 
 if __name__ == "__main__":
     main()
