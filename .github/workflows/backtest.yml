@@ -15,7 +15,7 @@ on:
         default: '15'
       threshold:
         description: '진입 점수 임계값'
-        default: '80'
+        default: '75'
 
 permissions:
   contents: read
@@ -27,6 +27,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -35,49 +36,38 @@ jobs:
       - name: 의존성 설치
         run: pip install -r requirements.txt
 
-      - name: grok Dalio 설정 강제 적용
+      - name: 수동 실행 옵션 적용 (universe / years / threshold만)
+        if: github.event_name == 'workflow_dispatch'
         run: |
           python - << 'EOF'
           import re
           path = "kr_stock_backtest.py"
           src = open(path, encoding="utf-8").read()
-          src = re.sub(r'"enable_swing": (True|False)', '"enable_swing": True', src)
-          src = re.sub(r'"max_concurrent": \d+', '"max_concurrent": 18', src)
-          src = re.sub(r'"score_threshold": \d+', '"score_threshold": 80', src)
+          src = re.sub(r'"universe":\s*"[^"]+"', '"universe": "${{ inputs.universe }}"', src)
+          src = re.sub(r'"test_years":\s*\d+', '"test_years": ${{ inputs.years }}', src)
+          src = re.sub(r'"score_threshold":\s*\d+', '"score_threshold": ${{ inputs.threshold }}', src)
           open(path, "w", encoding="utf-8").write(src)
-          print("✅ grok + Dalio CONFIG 적용 완료")
+          print("✅ 옵션 적용 (리스크 설정은 보존)")
           EOF
 
       - name: 백테스트 실행
         run: python kr_stock_backtest.py | tee backtest_output.txt
-
-      - name: 요약 추출 (강화 버전)
-        id: summary
-        run: |
-          echo "### 🧪 백테스트 결과 (grok + Dalio #${{ github.run_number }})" > summary.md
-          echo "Run Date: $(date)" >> summary.md
-          echo '```text' >> summary.md
-          grep -E "GROK|DALIO|단기 스윙|장기 추세|승률|기대값|프로핏|누적 수익률|최대 낙폭|MDD|샤프|거래|완료|시작" backtest_output.txt | head -50 >> summary.md || true
-          if [ $(wc -l < summary.md) -lt 15 ]; then
-            echo "=== 전체 로그 일부 ===" >> summary.md
-            tail -n 100 backtest_output.txt >> summary.md
-          fi
-          echo '```' >> summary.md
-          cat summary.md
 
       - name: 리포트 업로드
         uses: actions/upload-artifact@v4
         with:
           name: backtest-${{ github.run_number }}
           path: |
-            backtest_report.html
+            backtest_summary.md
+            backtest_summary.json
             backtest_trades.csv
             backtest_output.txt
           retention-days: 90
+          if-no-files-found: warn
 
       - name: 결과 이슈 생성
         uses: peter-evans/create-issue-from-file@v5
         with:
-          title: "🧪 백테스트 결과 (grok Dalio #${{ github.run_number }})"
+          title: "🧪 백테스트 결과 #${{ github.run_number }}"
           content-filepath: backtest_summary.md
-          labels: backtest,grok-dalio
+          labels: backtest
