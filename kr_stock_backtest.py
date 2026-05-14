@@ -71,13 +71,14 @@ CONFIG = {
     "swing_stop_atr": 2.0,
     "swing_max_hold": 10,
 
-    # 포트폴리오 리스크 관리
-    "max_concurrent": 18,            # 15~20 분산
-    "min_position_pct": 3.0,
-    "max_position_pct": 8.0,
-    "risk_per_trade": 0.005,         # 거래당 0.5% 손실 한도
-    "portfolio_trail_pct": 0.20,     # 포트폴리오 고점 대비 -20% → 전량 청산
-    "portfolio_max_dd_pct": 0.25,    # -25% MDD 도달 시 운영 중단
+    # 포트폴리오 리스크 관리 (강화 — MDD -64% 대응)
+    "max_concurrent": 12,            # 18 → 12 (분산 vs 집중도 균형)
+    "min_position_pct": 2.0,         # 3 → 2
+    "max_position_pct": 5.0,         # 8 → 5 (단일 종목 익스포져 축소)
+    "risk_per_trade": 0.004,         # 0.5% → 0.4% (보수적)
+    "portfolio_trail_pct": 0.12,     # 0.20 → 0.12 (DD 빨리 정지)
+    "portfolio_max_dd_pct": 0.18,    # 0.25 → 0.18 (DD halt 더 일찍)
+    "dd_position_scaling": True,     # 포트폴리오 DD 깊을수록 포지션 작게
     "initial_capital": 10_000_000,
 
     # 유동성 필터
@@ -410,8 +411,16 @@ def simulate_portfolio(trades, with_risk_controls=True):
             continue
 
         portfolio = cash + sum(p[1] for p in positions)
-        # 거래의 위험 조정 포지션 크기 사용
         target_pct = t.position_pct / 100
+
+        # DD 가중 — 포트폴리오가 고점 대비 빠져있을수록 포지션 축소
+        if with_risk_controls and CONFIG.get("dd_position_scaling", False):
+            dd_now = (portfolio - portfolio_peak) / portfolio_peak
+            if dd_now < -0.05:
+                # -5% DD에서 80%, -10% DD에서 60%, -15% DD에서 40% 로 축소
+                scale = max(0.4, 1.0 + dd_now * 4)
+                target_pct *= scale
+
         alloc = min(portfolio * target_pct, cash)
         if alloc < 10000:
             skipped += 1
@@ -451,20 +460,30 @@ def trade_stats(trades, equity_pts=None):
     pf = (wins.sum() / -losses.sum()) if (len(losses) and losses.sum() < 0) else float("inf")
     expectancy = rets.mean()
 
-    # 자산곡선 통계 (포트폴리오 단위)
+    # 자산곡선 통계 — 일별 forward-fill 로 정확한 Sharpe 계산
     if equity_pts:
-        eq = np.array([v for _, v in equity_pts])
-        peak = np.maximum.accumulate(eq)
-        dd = (eq - peak) / peak
-        mdd = dd.min() * 100
-        # 일자별 수익률 (재구성)
-        eq_returns = np.diff(eq) / eq[:-1]
-        if len(eq_returns) > 1 and eq_returns.std() > 0:
-            # 거래 단위 → 연환산: sqrt(252/평균보유일)
-            avg_d = max(days.mean(), 1)
-            sharpe = eq_returns.mean() / eq_returns.std() * np.sqrt(252 / avg_d)
+        # 이벤트 기반을 일별 시계열로 변환
+        eq_df = pd.DataFrame(equity_pts, columns=["date", "value"]).sort_values("date")
+        eq_df = eq_df.drop_duplicates("date", keep="last").set_index("date")
+        # 영업일 빈도로 리샘플 + 직전값 채움
+        daily = eq_df["value"].resample("B").ffill().dropna()
+
+        if len(daily) > 30:
+            peak = daily.cummax()
+            dd = (daily - peak) / peak
+            mdd = float(dd.min() * 100)
+            daily_ret = daily.pct_change().dropna()
+            if daily_ret.std() > 0:
+                # 무위험 0% 가정, 영업일 252 환산
+                sharpe = float(daily_ret.mean() / daily_ret.std() * np.sqrt(252))
+            else:
+                sharpe = 0.0
         else:
-            sharpe = 0
+            # 짧은 기간이면 이벤트 기반 폴백
+            eq = np.array([v for _, v in equity_pts])
+            peak_arr = np.maximum.accumulate(eq)
+            mdd = float(((eq - peak_arr) / peak_arr).min() * 100)
+            sharpe = 0.0
     else:
         mdd = 0; sharpe = 0
 
@@ -653,22 +672,58 @@ def main():
     print(f"\n💾 거래내역 → {csv_path}")
 
     # 간단한 JSON 요약
+    full_stats = trade_stats(all_trades, port_full["equity_pts"])
+    full_stats_clean = {k: v for k, v in full_stats.items()
+                        if not isinstance(v, float) or np.isfinite(v)}
+    full_block = {
+        "trades": len(all_trades),
+        "total_return_pct": port_full["total_return_pct"],
+        "final_value": port_full["final"],
+        "halted": port_full.get("halted"),
+    }
+    full_block.update(full_stats_clean)
+
     summary = {
         "config": {k: v for k, v in CONFIG.items() if not callable(v)},
-        "full_sample": {
-            "trades": len(all_trades),
-            "total_return_pct": port_full["total_return_pct"],
-            "final_value": port_full["final"],
-            "halted": port_full.get("halted"),
-            **{k: v for k, v in trade_stats(all_trades, port_full["equity_pts"]).items()
-               if not isinstance(v, float) or np.isfinite(v)},
-        },
+        "full_sample": full_block,
         "in_sample": {
             "trades": len(in_trades),
             "total_return_pct": port_in["total_return_pct"],
             "annualized_pct": annualize_return(port_in["total_return_pct"], in_years),
         },
         "out_of_sample": {
+            "trades": len(out_trades),
+            "total_return_pct": port_out["total_return_pct"],
+            "annualized_pct": annualize_return(port_out["total_return_pct"], out_years),
+        },
+        "kospi_benchmark": {
+            "total_return_pct": bench["return_pct"],
+            "annualized_pct": annualize_return(bench["return_pct"], CONFIG["test_years"]),
+        },
+        "monte_carlo": mc,
+    }
+    summary_path = OUTPUT_DIR / "backtest_summary.json"
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str),
+                            encoding="utf-8")
+    print(f"📄 요약 → {summary_path}")
+
+    print("\n✅ 백테스트 완료.")
+    if mc:
+        if mc["return_p5"] > 0:
+            print("   👍 5% percentile도 양수 — 견고한 전략")
+        elif mc["return_median"] > bench["return_pct"]:
+            print("   ✓ 중앙값이 KOSPI 매수보유를 이김")
+        else:
+            print("   ⚠️ 인덱스 대비 알파 약함 — 파라미터 재검토 권장")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n중단됨.")
+        sys.exit(1)
+"out_of_sample": {
             "trades": len(out_trades),
             "total_return_pct": port_out["total_return_pct"],
             "annualized_pct": annualize_return(port_out["total_return_pct"], out_years),
