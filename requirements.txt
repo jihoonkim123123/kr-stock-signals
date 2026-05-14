@@ -13,3 +13,5 @@ requests>=2.31.0
 # 네이버 뉴스 크롤링
 beautifulsoup4>=4.12.0
 
+
+
