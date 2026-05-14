@@ -79,5 +79,5 @@ jobs:
         uses: peter-evans/create-issue-from-file@v5
         with:
           title: "🧪 백테스트 결과 (grok Dalio #${{ github.run_number }})"
-          content-filepath: summary.md
-          labels: backtest, grok-dalio
+          content-filepath: backtest_summary.md
+          labels: backtest,grok-dalio
