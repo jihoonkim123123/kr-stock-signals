@@ -46,7 +46,7 @@ CONFIG = {
     "universe": "BOTH",              # KOSPI200 / KOSDAQ150 / BOTH
 
     # 진입 기준
-    "score_threshold": 75,           # 종합 점수 75 이상 진입
+    "score_threshold": 70,           # 종합 점수 75 이상 진입
     "enable_swing": False,
     "enable_trend": True,
 
@@ -74,13 +74,17 @@ CONFIG = {
     # 포트폴리오 리스크 관리 (강화 — MDD -64% 대응)
     "max_concurrent": 12,            # 18 → 12 (분산 vs 집중도 균형)
     "min_position_pct": 2.0,         # 3 → 2
-    "max_position_pct": 5.0,         # 8 → 5 (단일 종목 익스포져 축소)
-    "risk_per_trade": 0.004,         # 0.5% → 0.4% (보수적)
+    "max_position_pct": 10.0,         # 8 → 10 (단일 종목 익스포져 확대)
+    "risk_per_trade": 0.008,         # 0.5% → 0.4% (보수적)
     "portfolio_trail_pct": 0.12,     # 0.20 → 0.12 (DD 빨리 정지)
-    "portfolio_max_dd_pct": 0.18,    # 0.25 → 0.18 (DD halt 더 일찍)
+    "portfolio_max_dd_pct": 0.22,    # 0.25 → 0.18 (DD halt 더 일찍)
     "dd_position_scaling": True,     # 포트폴리오 DD 깊을수록 포지션 작게
     "initial_capital": 10_000_000,
-
+    "enable_sector_momentum": True,
+    "sector_lookback": 60,           # 60일 섹터 수익률
+    "sector_top_n": 5,               # 상위 5개 섹터만 진입 허용
+    "sector_min_momentum": 5.0,      # 섹터 수익률 최소 기준 (%)
+    
     # 유동성 필터
     "min_daily_value": 500_000_000,  # 일평균 거래대금 5억 미만 제외
 
