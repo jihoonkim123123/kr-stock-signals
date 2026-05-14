@@ -45,50 +45,47 @@ CONFIG = {
     # 유니버스
     "universe": "BOTH",              # KOSPI200 / KOSDAQ150 / BOTH
 
-    # 진입 기준
-    "score_threshold": 70,           # 종합 점수 75 이상 진입
+ # 진입 기준 — 약간 완화하지만 과도하지 않게
+    "score_threshold": 72,                    # 75 → 72 (Dalio: 충분한 기회 포착)
     "enable_swing": False,
     "enable_trend": True,
 
-    # 종합 점수 가중치 (총 100%, 감성 제외)
-    "w_technical": 0.40,
-    "w_supply":    0.30,
-    "w_momentum":  0.30,
+    # 종합 점수 가중치 (모멘텀 강조)
+    "w_technical": 0.35,
+    "w_supply": 0.25,
+    "w_momentum": 0.40,                       # 0.30 → 0.40 (모멘텀 강하게)
 
-    # 시장 레짐
+    # 시장 레짐 (유지, Dalio가 좋아할 부분)
     "regime_filter": True,
     "regime_index": "KS11",
     "regime_ma": 200,
 
-    # 추세 청산 (강화)
+    # 추세 청산
     "trend_min_hold": 20,
     "trend_break_consecutive": 5,
-    "trend_trail_pct": 12.0,         # 8 → 12 (한국 변동성 대응)
-    "reentry_cooldown_days": 30,
+    "trend_trail_pct": 14.0,                  # 12 → 14 (강하게 타되 너무 늦지 않게)
+    "reentry_cooldown_days": 25,              # 30 → 25 (조금 더 유연)
 
-    # 단기 스윙 (비활성 시 무시)
-    "swing_target_atr": 3.0,
-    "swing_stop_atr": 2.0,
-    "swing_max_hold": 10,
+    # 포트폴리오 리스크 관리 — Risk Parity 스타일
+    "max_concurrent": 15,                     # 12 → 15 (분산 ↑)
+    "min_position_pct": 1.8,
+    "max_position_pct": 6.5,                  # 10 → 6.5 (단일 종목 과집중 방지)
+    "risk_per_trade": 0.0055,                 # 0.008 → 0.0055 (위험 균형)
+    "portfolio_trail_pct": 0.15,              # 0.12 → 0.15
+    "portfolio_max_dd_pct": 0.20,             # 0.22 → 0.20 (MDD 철저 통제)
+    "dd_position_scaling": True,
 
-    # 포트폴리오 리스크 관리 (강화 — MDD -64% 대응)
-    "max_concurrent": 12,            # 18 → 12 (분산 vs 집중도 균형)
-    "min_position_pct": 2.0,         # 3 → 2
-    "max_position_pct": 10.0,         # 8 → 10 (단일 종목 익스포져 확대)
-    "risk_per_trade": 0.008,         # 0.5% → 0.4% (보수적)
-    "portfolio_trail_pct": 0.12,     # 0.20 → 0.12 (DD 빨리 정지)
-    "portfolio_max_dd_pct": 0.22,    # 0.25 → 0.18 (DD halt 더 일찍)
-    "dd_position_scaling": True,     # 포트폴리오 DD 깊을수록 포지션 작게
-    "initial_capital": 10_000_000,
+    # Sector Momentum (강하게 타되 안전장치)
     "enable_sector_momentum": True,
-    "sector_lookback": 60,           # 60일 섹터 수익률
-    "sector_top_n": 5,               # 상위 5개 섹터만 진입 허용
-    "sector_min_momentum": 5.0,      # 섹터 수익률 최소 기준 (%)
-    
-    # 유동성 필터
-    "min_daily_value": 500_000_000,  # 일평균 거래대금 5억 미만 제외
+    "sector_lookback": 60,
+    "sector_top_n": 6,                        # 5 → 6 (조금 더 다양성)
+    "sector_momentum_boost": 1.45,            # 1.8 → 1.45 (강하지만 과도X)
+    "sector_min_momentum": 4.0,               # 5.0 → 4.0 (기회 확대)
 
-    # 거래 비용 (한국 시장)
+    "initial_capital": 10_000_000,
+
+    # 유동성 & 비용 (유지)
+    "min_daily_value": 500_000_000,
     "commission_buy": 0.00015,
     "commission_sell": 0.00015,
     "tax_sell": 0.0018,
