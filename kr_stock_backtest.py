@@ -723,35 +723,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n중단됨.")
         sys.exit(1)
-"out_of_sample": {
-            "trades": len(out_trades),
-            "total_return_pct": port_out["total_return_pct"],
-            "annualized_pct": annualize_return(port_out["total_return_pct"], out_years),
-        },
-        "kospi_benchmark": {
-            "total_return_pct": bench["return_pct"],
-            "annualized_pct": annualize_return(bench["return_pct"], CONFIG["test_years"]),
-        },
-        "monte_carlo": mc,
-    }
-    summary_path = OUTPUT_DIR / "backtest_summary.json"
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str),
-                            encoding="utf-8")
-    print(f"📄 요약 → {summary_path}")
-
-    print("\n✅ 백테스트 완료.")
-    if mc:
-        if mc["return_p5"] > 0:
-            print("   👍 5% percentile도 양수 — 견고한 전략")
-        elif mc["return_median"] > bench["return_pct"]:
-            print("   ✓ 중앙값이 KOSPI 매수보유를 이김")
-        else:
-            print("   ⚠️ 인덱스 대비 알파 약함 — 파라미터 재검토 권장")
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n중단됨.")
-        sys.exit(1)
