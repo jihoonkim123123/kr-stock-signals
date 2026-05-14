@@ -38,63 +38,77 @@ OUTPUT_DIR = Path(__file__).parent
 # CONFIG
 # =============================================================================
 CONFIG = {
-    # 기간
-    "test_years": 15,                # 2011~ 다중 사이클 커버
-    "oos_pct": 0.30,                 # 끝 30% 를 out-of-sample 로 보존
+# ====================== 기본 설정 ======================
+    "test_years": 15,                    # 백테스트 기간 (15년)
+    "oos_pct": 0.30,                     # Out-of-Sample 비율 (최근 30%를 검증 기간으로 남김)
 
-    # 유니버스
-    "universe": "BOTH",              # KOSPI200 / KOSDAQ150 / BOTH
+    # ====================== 진입 기준 ======================
+    "score_threshold": 68,               # 종합 점수가 이 이상이면 매수 진입 (낮을수록 더 많이 진입)
+    "enable_swing": False,               # 단기 스윙 매매 사용 여부 (현재는 OFF)
+    "enable_trend": True,                # 중장기 추세 전략 사용 (주력)
 
- # 진입 기준 — 약간 완화하지만 과도하지 않게
-    "score_threshold": 72,                    # 75 → 72 (Dalio: 충분한 기회 포착)
-    "enable_swing": False,
-    "enable_trend": True,
+    # ====================== 점수 가중치 (모멘텀 극대화) ======================
+    "w_technical": 0.30,                 # 기술적 분석 가중치 (30%)
+    "w_supply": 0.20,                    # 수급 분석 가중치 (20%)
+    "w_momentum": 0.50,                  # 모멘텀 가중치 (50%) ← Druckenmiller 핵심: 모멘텀 최우선
 
-    # 종합 점수 가중치 (모멘텀 강조)
-    "w_technical": 0.35,
-    "w_supply": 0.25,
-    "w_momentum": 0.40,                       # 0.30 → 0.40 (모멘텀 강하게)
+    # ====================== 시장 레짐 필터 ======================
+    "regime_filter": True,               # 시장이 강세장일 때만 매매 (200일 이동평균 위)
+    "regime_index": "KS11",              # 레짐 판단 기준 지수 (코스피)
+    "regime_ma": 200,                    # 200일 이동평균 사용
 
-    # 시장 레짐 (유지, Dalio가 좋아할 부분)
-    "regime_filter": True,
-    "regime_index": "KS11",
-    "regime_ma": 200,
+    # ====================== 청산 규칙 ======================
+    "trend_min_hold": 15,                # 최소 보유 기간 (일)
+    "trend_break_consecutive": 5,        # MA20이 MA60 아래로 5일 연속이면 청산
+    "trend_trail_pct": 18.0,             # 고점 대비 -18% 떨어지면 trailing stop (길게 가져가기)
+    "reentry_cooldown_days": 20,         # 청산 후 재진입 대기 기간 (너무 자주 안 하게)
 
-    # 추세 청산
-    "trend_min_hold": 20,
-    "trend_break_consecutive": 5,
-    "trend_trail_pct": 14.0,                  # 12 → 14 (강하게 타되 너무 늦지 않게)
-    "reentry_cooldown_days": 25,              # 30 → 25 (조금 더 유연)
+    # ====================== 포트폴리오 집중도 ======================
+    "max_concurrent": 10,                # 최대 동시에 보유할 종목 수 (10종목 집중)
+    "min_position_pct": 2.0,             # 최소 포지션 비중 (%)
+    "max_position_pct": 12.0,            # 최대 포지션 비중 (%) ← 강한 종목에 크게 베팅
+    "risk_per_trade": 0.009,             # 한 종목당 위험 허용치 (0.9%)
 
-    # 포트폴리오 리스크 관리 — Risk Parity 스타일
-    "max_concurrent": 15,                     # 12 → 15 (분산 ↑)
-    "min_position_pct": 1.8,
-    "max_position_pct": 6.5,                  # 10 → 6.5 (단일 종목 과집중 방지)
-    "risk_per_trade": 0.0055,                 # 0.008 → 0.0055 (위험 균형)
-    "portfolio_trail_pct": 0.15,              # 0.12 → 0.15
-    "portfolio_max_dd_pct": 0.20,             # 0.22 → 0.20 (MDD 철저 통제)
-    "dd_position_scaling": True,
+    # ====================== 포트폴리오 리스크 관리 ======================
+    "portfolio_trail_pct": 0.22,         # 전체 포트폴리오가 고점 대비 -22% 떨어지면 청산
+    "portfolio_max_dd_pct": 0.35,        # 최대 허용 MDD (-35%) ← 큰 손실도 감내
+    "dd_position_scaling": True,         # MDD가 커지면 포지션 크기 자동 축소
 
-    # Sector Momentum (강하게 타되 안전장치)
-    "enable_sector_momentum": True,
-    "sector_lookback": 60,
-    "sector_top_n": 6,                        # 5 → 6 (조금 더 다양성)
-    "sector_momentum_boost": 1.45,            # 1.8 → 1.45 (강하지만 과도X)
-    "sector_min_momentum": 4.0,               # 5.0 → 4.0 (기회 확대)
+    # ====================== 섹터 모멘텀 (강력 집중) ======================
+    "enable_sector_momentum": True,      # 섹터 모멘텀 필터 사용
+    "sector_lookback": 60,               # 최근 60일 섹터 수익률로 판단
+    "sector_top_n": 4,                   # 상위 4개 섹터만 매매 허용
+    "sector_momentum_boost": 2.0,        # 강한 섹터 종목은 포지션 2배 확대
+    "sector_min_momentum": 3.0,          # 섹터가 최소 +3% 이상 상승해야 진입
 
-    "initial_capital": 10_000_000,
+    # ====================== 추가 공격 변수 ======================
+    "volatility_scaling": True,          # 시장 변동성이 크면 포지션 크기 자동 줄임
+    "vol_lookback": 60,                  # 변동성 계산 기간 (60일)
+    "vol_target": 0.018,                 # 목표 연율화 변동성 (1.8%)
 
-    # 유동성 & 비용 (유지)
-    "min_daily_value": 500_000_000,
-    "commission_buy": 0.00015,
-    "commission_sell": 0.00015,
-    "tax_sell": 0.0018,
-    "slippage": 0.003,
+    "momentum_boost_threshold": 85,      # 종합점수 85점 이상이면 추가 부스트
+    "high_momentum_multiplier": 1.6,     # 초강력 모멘텀 종목에게 1.6배 더 베팅
+
+    "partial_take_profit": True,         # 부분 익절 기능 사용
+    "take_profit_pct": 40.0,             # +40% 오르면 일부 매도
+    "tp_portion": 0.5,                   # +40% 도달 시 50% 매도 (나머지는 계속 보유)
+
+    "max_sector_concentration": 0.45,    # 한 섹터에 최대 45%까지 투자 가능
+
+    "min_volume_explosion": 2.5,         # 거래량 폭발 기준 (2.5배 이상)
+    "require_regime_and_sector": True,   # 레짐 + 섹터 조건 둘 다 만족해야 진입
+
+    # ====================== 기타 ======================
+    "initial_capital": 10_000_000,       # 초기 자본 (1천만원)
+    "min_daily_value": 500_000_000,      # 일평균 거래대금 5억 이상만 매매
+    "commission_buy": 0.00015,           # 매수 수수료
+    "commission_sell": 0.00015,          # 매도 수수료
+    "tax_sell": 0.0018,                  # 매도 시 거래세
+    "slippage": 0.003,                   # 슬리피지 (0.3%)
 
     # Monte Carlo
     "enable_montecarlo": True,
     "mc_iterations": 500,
-
     "workers": 8,
 }
 
